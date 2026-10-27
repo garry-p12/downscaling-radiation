@@ -1,0 +1,6 @@
+# Clear-sky-index experiment (method B): the model works in k* = GHI / GHI_clear
+# instead of kt = GHI / TOA. Runs land in runs/<group>_clearsky.
+extends: train.yaml
+run_suffix: clearsky
+kt:
+  normalise: clearsky

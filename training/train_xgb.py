@@ -48,7 +48,7 @@ def main(track: str, weight: str | None, n_rows: int | None, tag: str | None = N
     rng = np.random.default_rng(int(xc.get("seed", 0)))
     fb = builder(dcfg, tcfg)
     names = [n for n in fb.track(track) if n not in set(drop or [])]
-    out = run_dir(dcfg, tcfg, f"xgb_{track}" + (f"_{tag}" if tag else ""))
+    out = run_dir(dcfg, tcfg, f"xgb_{track.replace('+', '_')}" + (f"_{tag}" if tag else ""))
     print(f"[xgb] track {track}: {len(names)} features -> {out}")
 
     strat = xc.get("stratify_on") is not None
@@ -105,7 +105,7 @@ def main(track: str, weight: str | None, n_rows: int | None, tag: str | None = N
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--track", choices=["A", "B", "C"], default="A")
+    ap.add_argument("--track", default="A", help="A, B or C, plus modifiers: B+T, B+cod+T")
     ap.add_argument("--loss-weight", choices=[*LOSS_WEIGHTS, "auto"], default=None)
     ap.add_argument("--n-rows", type=int, default=None)
     ap.add_argument("--tag", default=None, help="run-name suffix")

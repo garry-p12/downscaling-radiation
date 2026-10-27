@@ -1,0 +1,5 @@
+# GOES window (data_goes.yaml) trained on the fold-b station-anchored target.
+extends: data_goes.yaml
+
+run_group: data_store_goes_corr_b
+target_var: nsrdb_ghi_corr_b

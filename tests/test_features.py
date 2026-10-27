@@ -61,3 +61,30 @@ def test_kt_target_roundtrips_to_ghi(synth_store, train_cfg):
     ghi = fb.kt[t] * fb.toa(fb.doy[t])
     m = fb.valid
     assert np.allclose(ghi[m], fb.ghi[t][m], rtol=1e-5, equal_nan=True)
+
+
+def test_clearsky_normaliser_round_trips(synth_store, train_cfg):
+    import copy
+
+    cfg = copy.deepcopy(train_cfg)
+    cfg["kt"]["normalise"] = "clearsky"
+    fb = FeatureBuilder(synth_store, cfg)
+    t = int(np.nonzero(fb.split == "test")[0][0])
+    # index x normaliser gives back the target, and the clear-sky normaliser
+    # sits below TOA (clear-sky transmittance < 1)
+    ok = fb.valid & np.isfinite(fb.ghi[t])
+    assert np.allclose((fb.kt[t] * fb.norm(t))[ok], fb.ghi[t][ok], rtol=1e-5)
+    assert np.all(fb.norm(t)[ok] <= fb.toa(fb.doy[t])[ok] + 1e-6)
+    # a zero residual reproduces POWER's own all-sky/clear-sky ratio
+    assert np.allclose(fb.kt_bilinear(t), fb.bilinear(np.clip(fb.c["clr_ratio"][t], 0, 2)))
+
+
+def test_temporal_features_are_shifted_days(synth_store, train_cfg):
+    fb = FeatureBuilder(synth_store, train_cfg)
+    names = fb.track("A+T")
+    assert "kt_bilinear@-1" in names and "kt_bilinear@+1" in names
+    f = fb.day_fields(10, ["kt_bilinear", "kt_bilinear@-1", "kt_bilinear@+1"])
+    assert np.allclose(f["kt_bilinear@-1"], fb.kt_bilinear(9))
+    assert np.allclose(f["kt_bilinear@+1"], fb.kt_bilinear(11))
+    # clamped at the record's edges
+    assert np.allclose(fb.day_fields(0, ["kt_bilinear@-1"])["kt_bilinear@-1"], fb.kt_bilinear(0))

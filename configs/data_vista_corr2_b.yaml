@@ -1,0 +1,6 @@
+# Station-anchored target v2, fold b: error model fit on BOTH networks (USCRN +
+# Oklahoma Mesonet), all stations except slurm/fold2_b.txt. Scored only there.
+extends: data_vista.yaml
+
+run_group: data_store_corr2_b
+target_var: nsrdb_ghi_corr_2b

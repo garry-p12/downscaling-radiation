@@ -1,6 +1,9 @@
 # Features, physical constraints, model training, evaluation.
 
 kt:
+  # toa: index = GHI / TOA (kt). clearsky: GHI / fine clear-sky GHI (k*),
+  # see features/builder.py and configs/train_clearsky.yaml.
+  normalise: toa
   max: 0.85                  # plan 2.2: clip predictions to [0, ~0.85]
   # Ceiling from POWER clear-sky: kt <= (CLRSKY / TOA) * clr_margin. The margin
   # is > 1 because NSRDB clear-sky days can exceed CERES clear-sky (different
@@ -64,6 +67,23 @@ features:
     - goes_cf
     - goes_cf_am
     - goes_cf_pm
+  # "+cod" modifier: GOES-16 cloud optical depth as daily, sunlight-weighted
+  # two-stream cloud transmittance (data/goes_cloud.py --product cod), 2018+.
+  # Same GOES caveat as Track C: NSRDB is built from GOES cloud properties.
+  track_cod_extra:
+    - goes_tcld
+    - goes_tcld_am
+    - goes_tcld_pm
+  # "+T" modifier: these features (when in the track) are added again at the
+  # day offsets below, so the model sees cloud systems moving through.
+  temporal:
+    - kt_bilinear
+    - modis_cf
+    - modis_cf_terra
+    - modis_cf_aqua
+    - goes_cf
+    - goes_tcld
+  temporal_offsets: [-1, 1]
 
 xgboost:
   n_rows: 3000000            # training rows (pixel-days) after subsampling
@@ -126,3 +146,16 @@ logging:
     project: downscaling-radiation
     mode: online
   out_dir: "runs"
+
+# Residual diffusion on a frozen mean model (method C, training/train_diffusion.py).
+diffusion:
+  steps: 60000
+  batch_size: 64
+  crop: 32
+  lr: 2.0e-4
+  weight_decay: 0.0
+  ema: 0.999
+  eval_every: 2000
+  seed: 0
+  members: 16                # ensemble size at evaluation
+  unet: {base: 64, mults: [1, 2, 4], blocks: 2, dropout: 0.1}

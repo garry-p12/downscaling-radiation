@@ -63,7 +63,7 @@ def stratum_labels(fb, days: np.ndarray, ecfg) -> dict[str, np.ndarray]:
     """(D, ny, nx) string labels per stratification axis."""
     D, sh = days.size, (fb.ny, fb.nx)
     lo, hi = ecfg.get("sky_bins", [0.3, 0.65])
-    kt = fb.kt[days]
+    kt = fb.ghi[days] / np.stack([fb.toa(fb.doy[t]) for t in days])   # TOA kt, any mode
     sky = np.where(kt < lo, "overcast", np.where(kt < hi, "partly", "clear"))
     sky = np.where(np.isfinite(kt), sky, "none")
     months = pd.DatetimeIndex(fb.times[days]).month
@@ -296,11 +296,11 @@ def add_amplitude_corrected(fb, preds, P, Ps, test_days, sp_days, out) -> None:
     (out / "amp_gains.json").write_text(json.dumps(gains, indent=2))
 
 
-def main(models: list[str] | None, amp: bool = False) -> None:
+def main(models: list[str] | None, amp: bool = False, out_name: str = "eval") -> None:
     dcfg, tcfg = load_all()
     ecfg = tcfg["eval"]
     fb = builder(dcfg, tcfg)
-    out = run_dir(dcfg, tcfg, "eval")
+    out = run_dir(dcfg, tcfg, out_name)
     preds = load_predictors(fb, dcfg, tcfg, models)
     print(f"[eval] models: {list(preds)}")
     cells = evaluation_cells(fb.split, fb.holdout, fb.exclusion, fb.valid,
@@ -388,5 +388,8 @@ if __name__ == "__main__":
     # amplified misplaced texture: SSIM 0.41 -> 0.29, RMSE worse than B0.
     ap.add_argument("--amp", action="store_true",
                     help="add post-hoc band-amplitude corrected '+amp' variants")
+    ap.add_argument("--out", default="eval",
+                    help="output dir under the run group; use another name with --models "
+                         "so a partial evaluation never overwrites the full one")
     a = ap.parse_args()
-    main(a.models, a.amp)
+    main(a.models, a.amp, a.out)

@@ -47,3 +47,13 @@ def test_station_daily_uses_solar_day():
     full = d.set_index("date").ghi_kwh
     assert np.isfinite(full[pd.Timestamp("2020-06-02")])
     assert 7 < full[pd.Timestamp("2020-06-02")] < 10
+
+
+def test_parse_mesonet_daily_units_and_missing():
+    from data.stations import parse_mesonet_daily
+
+    text = "STID,YEAR,MONTH,DAY,ATOT\nACME,2020,6,1,28.8\nacme ,2020,6,2,-996\n"
+    d = parse_mesonet_daily(text)
+    assert list(d.station_id) == ["ACME", "ACME"]
+    assert abs(d.ghi_kwh.iloc[0] - 8.0) < 1e-9 and np.isnan(d.ghi_kwh.iloc[1])
+    assert str(d.date.iloc[1].date()) == "2020-06-02"

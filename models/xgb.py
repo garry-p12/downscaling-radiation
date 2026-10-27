@@ -50,4 +50,4 @@ class XGBPredictor:
 
     def __call__(self, t: int) -> np.ndarray:
         kt = self.fb.clip(self.fb.kt_bilinear(t) + self.residual(t), t)
-        return kt * self.fb.toa(self.fb.doy[t])
+        return kt * self.fb.norm(t)

@@ -25,7 +25,7 @@ def b0(fb: FeatureBuilder, t: int) -> np.ndarray:
 
 
 def b1(fb: FeatureBuilder, t: int) -> np.ndarray:
-    return np.clip(fb.kt_bilinear(t), 0, 1) * fb.toa(fb.doy[t])
+    return np.clip(fb.kt_bilinear_toa(t), 0, 1) * fb.toa(fb.doy[t])
 
 
 def b2(fb: FeatureBuilder, t: int) -> np.ndarray:
@@ -40,7 +40,7 @@ def b2(fb: FeatureBuilder, t: int) -> np.ndarray:
 
 def b3(fb: FeatureBuilder, t: int) -> np.ndarray:
     kt = fb.kt_bilinear(t) * fb.b3_ratio[fb.doy[t] - 1]
-    return fb.clip(kt, t) * fb.toa(fb.doy[t])
+    return fb.clip(kt, t) * fb.norm(t)
 
 
 def predictor(name: str):

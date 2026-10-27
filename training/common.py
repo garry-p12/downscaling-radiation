@@ -28,9 +28,14 @@ def builder(dcfg, tcfg) -> FeatureBuilder:
 
 
 def runs_root(dcfg, tcfg) -> Path:
-    """runs/<run_group>; run_group defaults to the store_root name, so synthetic
-    and real runs never collide and an experiment group can be set per config."""
+    """runs/<run_group>[_<run_suffix>]; run_group defaults to the store_root
+    name, so synthetic and real runs never collide and an experiment group can
+    be set per config. A train config's ``run_suffix`` (e.g. clearsky) keeps
+    models built with a different normaliser out of the default group, since
+    one evaluation must use one FeatureBuilder."""
     group = dcfg.get("run_group") or Path(dcfg["store_root"]).name
+    if tcfg.get("run_suffix"):
+        group = f"{group}_{tcfg['run_suffix']}"
     return Path(tcfg["logging"]["out_dir"]) / group
 
 

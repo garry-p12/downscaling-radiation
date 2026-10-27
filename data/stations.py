@@ -283,6 +283,35 @@ def download_uscrn(cfg, years: list[int]) -> None:
 # --------------------------------------------------------------------------- #
 # Build
 # --------------------------------------------------------------------------- #
+def parse_mesonet_daily(text: str) -> pd.DataFrame:
+    """Oklahoma Mesonet daily-summary CSV (daily data retrieval) -> rows of
+    station_id, date, ghi_kwh. ATOT is the day's solar total in MJ/m2,
+    computed by the Mesonet only when >= 99% of the day's 5-min samples exist;
+    Mesonet missing/flag codes are negative (-990s) and become NaN. Column
+    names are matched case-insensitively (STID; YEAR/MONTH/DAY or DATE)."""
+    df = pd.read_csv(io.StringIO(text), skipinitialspace=True)
+    df.columns = [c.strip().upper() for c in df.columns]
+    if "DATE" in df.columns:
+        date = pd.to_datetime(df["DATE"])
+    else:
+        date = pd.to_datetime(dict(year=df["YEAR"], month=df["MONTH"], day=df["DAY"]))
+    atot = pd.to_numeric(df["ATOT"], errors="coerce")
+    return pd.DataFrame({"station_id": df["STID"].astype(str).str.strip().str.upper(),
+                         "date": date.dt.normalize(),
+                         "ghi_kwh": np.where(atot >= 0, atot / 3.6, np.nan)})
+
+
+def daily_physical_qc(d: pd.DataFrame, lat: float) -> pd.DataFrame:
+    """Drop daily totals outside 0.02-0.85 of daily TOA (instrument faults,
+    snow-covered domes, partial days the provider did not flag)."""
+    from common.solar import toa_daily_kwh
+
+    doy = pd.DatetimeIndex(d.date).dayofyear.values
+    toa = np.array([float(toa_daily_kwh(np.array([lat]), int(k))[0]) for k in doy])
+    kt = d.ghi_kwh.values / toa
+    return d[(kt >= 0.02) & (kt <= 0.85)]
+
+
 def build(cfg) -> None:
     sc = cfg["sources"]["stations"]
     root = Path(sc["out_dir"])
@@ -290,9 +319,27 @@ def build(cfg) -> None:
     daily, metas, reports = [], [], []
 
     meso = root / "ok_mesonet"
+    # Daily summaries (the Mesonet's own request service) take precedence over
+    # 5-min MTS files for any station they cover.
+    meso_daily = pd.DataFrame()
+    if meso.exists():
+        parts = [parse_mesonet_daily(f.read_text()) for f in sorted(meso.glob("*.csv"))
+                 if f.name != "meta.csv"]
+        if parts:
+            meso_daily = pd.concat(parts, ignore_index=True).drop_duplicates(["station_id", "date"])
     if (meso / "meta.csv").exists():
         meta = pd.read_csv(meso / "meta.csv")
         for _, s in meta.iterrows():
+            dd = meso_daily[meso_daily.station_id == s.station_id] if len(meso_daily) else meso_daily
+            if len(dd):
+                n0 = int(dd.ghi_kwh.notna().sum())
+                dd = daily_physical_qc(dd.dropna(subset=["ghi_kwh"]), s.lat)
+                daily.append(dd[["date", "ghi_kwh"]].assign(missing_frac=0.0,
+                                                            station_id=s.station_id))
+                metas.append(dict(s))
+                reports.append(dict(station_id=s.station_id, network="ok_mesonet",
+                                    days_total=n0, days_kept=len(dd)))
+                continue
             files = sorted((meso / s.station_id).glob("*.mts"))
             if not files:
                 continue
@@ -336,6 +383,9 @@ def build(cfg) -> None:
     grid = build_target_grid(cfg["domain"], cfg["grid"])
     meta = map_to_grid(pd.DataFrame(metas), grid, cfg.get("holdout"))
     rep = pd.DataFrame(reports)
+    for c in ("fail_ppl", "fail_closure", "daylight_present"):
+        if c not in rep:                 # daily-only networks carry no sample-level QC
+            rep[c] = np.nan
     rep["qc_pass_rate"] = 1 - (rep.fail_ppl + rep.fail_closure) / rep.daylight_present.clip(lower=1)
     rep["day_keep_rate"] = rep.days_kept / rep.days_total.clip(lower=1)
     out = pd.concat(daily, ignore_index=True).dropna(subset=["ghi_kwh"])

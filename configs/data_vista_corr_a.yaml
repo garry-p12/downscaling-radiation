@@ -1,0 +1,8 @@
+# Station-anchored target (method A2), fold a: NSRDB + an error model fit
+# on station-days of every station EXCEPT this fold's (Austin 33 NW, Monahans, Palestine, Port Aransas),
+# built by  evaluation/station_anchor.py build-target --fold a.
+# Scored only at this fold's stations.
+extends: data_vista.yaml
+
+run_group: data_store_corr_a
+target_var: nsrdb_ghi_corr_a

@@ -96,7 +96,7 @@ class Batcher:
             X.append(self.inputs(t)[(slice(None),) + sl])
             Y.append(self.fb.residual_target(t)[sl])
             M.append(self.mask[sl])
-            toa = self.fb.toa(self.fb.doy[t])[sl]
+            toa = self.fb.norm(t)[sl]
             Wt.append(toa / toa.mean())
             KB.append(self.fb.kt_bilinear(t)[sl])
             E.append(self.enc[sl])
@@ -138,7 +138,7 @@ class SwinPredictor:
     def ghi(self, t: int, channel: int | None = None) -> np.ndarray:
         r = self.raw(t)[self.point if channel is None else channel]
         kt = self.fb.clip(self.fb.kt_bilinear(t) + r, t)
-        return kt * self.fb.toa(self.fb.doy[t])
+        return kt * self.fb.norm(t)
 
     def __call__(self, t: int) -> np.ndarray:
         return self.ghi(t)
@@ -165,7 +165,7 @@ def main(track: str, quantiles, epochs, model_cfg_name: str, device: str | None,
     ssim_w = float(sc.get("ssim_weight", 0.0) if ssim_weight is None else ssim_weight)
     if pixel_loss == "amse" and quantiles:
         raise ValueError("amse is a point loss; not combinable with --quantiles")
-    out = run_dir(dcfg, tcfg, f"swin_{track}" + ("_q" if quantiles else "")
+    out = run_dir(dcfg, tcfg, f"swin_{track.replace('+', '_')}" + ("_q" if quantiles else "")
                   + (f"_{tag}" if tag else ""))
     dev = pick_device(device)
     last = out / "last.pt"
@@ -261,7 +261,7 @@ def main(track: str, quantiles, epochs, model_cfg_name: str, device: str | None,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--track", choices=["A", "B", "C"], default="A")
+    ap.add_argument("--track", default="A", help="A, B or C, plus modifiers: B+T, B+cod+T")
     ap.add_argument("--quantiles", type=float, nargs="+", default=None)
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--steps-per-epoch", type=int, default=None)

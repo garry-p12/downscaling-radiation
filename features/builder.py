@@ -18,6 +18,20 @@ Target. The model target is the clearness-index residual
     r = kt_nsrdb - kt_bilinear,   kt_nsrdb = GHI_nsrdb / TOA_fine,
 with TOA_fine analytic per pixel per day (common/solar.toa_daily_kwh). The
 same TOA reconstructs GHI from a predicted kt, so the reframing is exact.
+
+Normaliser (train config ``kt.normalise``). ``toa`` is the above. ``clearsky``
+replaces TOA by a fine clear-sky GHI, TOA_fine x bilinear(POWER CLRSKY / TOA),
+so the index becomes the clear-sky index k* = GHI / GHI_clear and the POWER
+base is bilinear(ALLSKY / CLRSKY). Clear-sky transmittance carries the aerosol
+and water-vapour signal, so k* leaves the model only the cloud part to learn.
+Every normalise/reconstruct step goes through ``norm(t)``; the physical
+baselines B1/B2 stay TOA-based so they mean the same thing in every run.
+
+Temporal context. A feature name ``<name>@<k>`` is ``<name>`` on day t + k
+(clamped to the record), so ``modis_cf@-1`` is yesterday's cloud fraction.
+Track strings combine a base track with modifiers: ``B+T`` adds the
+``temporal`` features at ``temporal_offsets``; ``+cod`` adds the GOES cloud
+optical depth features (``track_cod_extra``).
 """
 from __future__ import annotations
 
@@ -36,7 +50,8 @@ STATIC_NAMES = ("dem", "slope", "aspect_sin", "aspect_cos", "svf", "elev_std",
                 "coastal_dist", "albedo", "lc_water", "lc_developed", "lc_barren",
                 "lc_forest", "lc_shrub", "lc_herbaceous", "lc_cultivated",
                 "lc_wetland")
-REFERENCES = {"NSRDB": "nsrdb_ghi", "ERA5L": "era5l_ghi"}   # label -> store variable
+REFERENCES = {"NSRDB": "nsrdb_ghi", "ERA5L": "era5l_ghi",   # label -> store variable
+              "GOES_DSR": "dsr_ghi"}
 POWER_DYNAMIC = {"power_pw": "power_pw", "power_aod": "power_aod",
                  "power_cloud": "power_cloud"}
 
@@ -143,11 +158,17 @@ class FeatureBuilder:
             self.c["power_kt"] = self.c["power_ghi"] / self.c["power_toa"]
         self.c["kt_clr"] = (self.c["power_ghi_clr"] / self.c["power_toa"]
                             if self.c["power_ghi_clr"] is not None else None)
+        self.mode = str(train_cfg["kt"].get("normalise", "toa"))
+        if self.mode == "clearsky" and self.c["kt_clr"] is None:
+            raise ValueError("kt.normalise=clearsky needs power_ghi_clr in the store")
         with np.errstate(invalid="ignore", divide="ignore"):
             self.c["clr_ratio"] = (self.c["power_ghi"] / self.c["power_ghi_clr"]
                                    if self.c["power_ghi_clr"] is not None else None)
             self.c["dhi_frac"] = (np.clip(self.c["power_dhi"] / self.c["power_ghi"], 0, 1)
                                   if self.c["power_dhi"] is not None else None)
+        # The coarse index the model's base is built from.
+        self.c["power_kn"] = (np.clip(self.c["clr_ratio"], 0, 2) if self.mode == "clearsky"
+                              else self.c["power_kt"])
         center = bool(fcfg.get("rolling_center", True))
         for k in fcfg.get("rolling", [3, 7]):
             self.c[f"roll{k}"] = _rolling(self.c["power_kt"], int(k), center)
@@ -175,8 +196,8 @@ class FeatureBuilder:
         self.refs = {lab: (self.ghi if var == target_var else ds[var].values.astype("float32"))
                      for lab, var in REFERENCES.items() if var in ds}
         self.kt = np.empty_like(self.ghi)
-        for i, d in enumerate(self.doy):
-            self.kt[i] = self.ghi[i] / np.maximum(self.toa(d), 1e-6)
+        for i in range(len(self.times)):
+            self.kt[i] = self.ghi[i] / np.maximum(self.norm(i), 1e-6)
         self.kt[:, ~self.valid] = np.nan
 
         # Training-only fine climatologies, filled into the excluded zone.
@@ -184,7 +205,7 @@ class FeatureBuilder:
         kt_train = np.where(self.train_pix[None], self.kt, np.nan)
         clim_fine = doy_climatology(kt_train, self.doy, self.train_days, sm)
         self.kt_clim_fine = fill_from(clim_fine, self.train_pix[None].repeat(366, 0), sigma)
-        bil_all = self.bilinear(self.c["power_kt"])
+        bil_all = self.bilinear(self.c["power_kn"])
         self.kt_bil_clim = doy_climatology(bil_all, self.doy, self.train_days, sm)
         with np.errstate(invalid="ignore", divide="ignore"):
             self.b3_ratio = np.clip(self.kt_clim_fine / self.kt_bil_clim, 0.5, 2.0)
@@ -195,18 +216,32 @@ class FeatureBuilder:
             self._toa[doy] = toa_daily_kwh(self.lat, doy).astype("float32")
         return self._toa[doy]
 
+    def norm(self, t: int) -> np.ndarray:
+        """Normaliser of day t: GHI = index x norm (TOA or fine clear-sky GHI)."""
+        toa = self.toa(self.doy[t])
+        if self.mode == "clearsky":
+            return (toa * np.clip(self.bilinear(self.c["kt_clr"][t]), 0.05, 1.0)).astype("float32")
+        return toa
+
     def bilinear(self, coarse_flat: np.ndarray) -> np.ndarray:
         """(..., nc) coarse -> (..., ny, nx) via the cached bilinear matrix."""
         out = rg.apply(self.W, coarse_flat)
         return out.reshape(*coarse_flat.shape[:-1], self.ny, self.nx).astype("float32")
 
     def kt_ceiling(self, t: int) -> np.ndarray | None:
-        return None if self.c["kt_clr"] is None else self.bilinear(self.c["kt_clr"][t])
+        if self.mode == "clearsky" or self.c["kt_clr"] is None:
+            return None
+        return self.bilinear(self.c["kt_clr"][t])
+
+    def kt_max(self) -> float:
+        k = self.cfg["kt"]
+        # k* is 1 on a clear day; the margin covers NSRDB clear days above
+        # CERES clear sky and cloud-edge enhancement.
+        return float(k["clr_margin"]) if self.mode == "clearsky" else float(k["max"])
 
     def clip(self, kt: np.ndarray, t: int) -> np.ndarray:
-        k = self.cfg["kt"]
-        return physical_clip(kt, self.kt_ceiling(t), float(k["max"]),
-                             float(k["clr_margin"]))
+        return physical_clip(kt, self.kt_ceiling(t), self.kt_max(),
+                             float(self.cfg["kt"]["clr_margin"]))
 
     def available(self, names: list[str]) -> list[str]:
         """Drop requested features this store cannot provide, loudly."""
@@ -218,6 +253,8 @@ class FeatureBuilder:
         return ok
 
     def _has(self, n: str) -> bool:
+        if "@" in n:
+            return self._has(n.split("@")[0])
         if n.startswith("kt_roll"):
             return f"roll{n[7:]}" in self.c
         if n in ("kt_bilinear", "kt_coarse_cell", "kt_anom", "kt_clim_fine",
@@ -230,14 +267,23 @@ class FeatureBuilder:
         return n in self.static or n in self.dyn
 
     def track(self, name: str) -> list[str]:
-        """A: POWER + statics. B: A + MODIS/POWER dynamics. C: B + GOES clouds."""
+        """A: POWER + statics. B: A + MODIS/POWER dynamics. C: B + GOES clouds.
+        Modifiers: ``+cod`` GOES cloud optical depth, ``+T`` temporal context."""
         f = self.cfg["features"]
+        base, *mods = name.split("+")
         names = list(f["track_A"])
-        if name.upper() in ("B", "C"):
+        if base.upper() in ("B", "C"):
             names += list(f["track_B_extra"])
-        if name.upper() == "C":
+        if base.upper() == "C":
             names += list(f.get("track_C_extra", []))
-        return self.available(names)
+        mods = [m.lower() for m in mods]
+        if "cod" in mods:
+            names += list(f.get("track_cod_extra", []))
+        names = self.available(names)
+        if "t" in mods:
+            names += [f"{n}@{k:+d}" for n in f.get("temporal", []) if n in names
+                      for k in f.get("temporal_offsets", [-1, 1])]
+        return names
 
     # ------------------------------------------------------------------ #
     def day_fields(self, t: int, names: list[str]) -> dict[str, np.ndarray]:
@@ -246,6 +292,11 @@ class FeatureBuilder:
         kt = self.c["power_kt"][t]
         out = {}
         for n in names:
+            if "@" in n:
+                base, k = n.split("@")
+                tt = int(np.clip(t + int(k), 0, len(self.times) - 1))
+                out[n] = self.day_fields(tt, [base])[base]
+                continue
             if n == "kt_bilinear":
                 v = self.bilinear(kt)
             elif n == "kt_coarse_cell":
@@ -282,6 +333,11 @@ class FeatureBuilder:
         return np.stack([f[n] for n in names])
 
     def kt_bilinear(self, t: int) -> np.ndarray:
+        """The model's base index (POWER kt, or k* in clear-sky mode)."""
+        return self.bilinear(self.c["power_kn"][t])
+
+    def kt_bilinear_toa(self, t: int) -> np.ndarray:
+        """Bilinear POWER kt = GHI/TOA whatever the normaliser (baselines, sky class)."""
         return self.bilinear(self.c["power_kt"][t])
 
     def residual_target(self, t: int) -> np.ndarray:
@@ -297,15 +353,16 @@ class FeatureBuilder:
     def gather_kt_bilinear(self, rows_t: np.ndarray, rows_pix: np.ndarray):
         out = np.empty(rows_t.size, dtype="float32")
         for t, idx in self._by_day(rows_t):
-            out[idx] = self.kt_bilinear(t).ravel()[rows_pix[idx]]
+            out[idx] = self.kt_bilinear_toa(t).ravel()[rows_pix[idx]]
         return out
 
     def table(self, rows_t: np.ndarray, rows_pix: np.ndarray, names: list[str]):
         """Gather features for (day, flat pixel) pairs, grouped by day so each
         day's fields are built once.
 
-        Returns X (n, F), y (n,) residual kt target, and aux: toa, kt_bil,
-        kt_ceil (POWER clear-sky ceiling or NaN), ghi (target kWh/m2/day).
+        Returns X (n, F), y (n,) residual kt target, and aux: toa (the
+        normaliser, ``norm``), kt_bil, kt_ceil (POWER clear-sky ceiling or
+        NaN), ghi (target kWh/m2/day).
         """
         n = rows_t.size
         X = np.empty((n, len(names)), dtype="float32")
@@ -318,7 +375,7 @@ class FeatureBuilder:
             kb = self.kt_bilinear(t).ravel()[pix]
             y[idx] = self.kt[t].ravel()[pix] - kb
             aux["kt_bil"][idx] = kb
-            aux["toa"][idx] = self.toa(self.doy[t]).ravel()[pix]
+            aux["toa"][idx] = self.norm(t).ravel()[pix]
             ceil = self.kt_ceiling(t)
             aux["kt_ceil"][idx] = np.nan if ceil is None else ceil.ravel()[pix]
             aux["ghi"][idx] = self.ghi[t].ravel()[pix]
@@ -326,7 +383,7 @@ class FeatureBuilder:
 
     def reconstruct(self, kt_bil, resid, toa, kt_ceil) -> np.ndarray:
         """Residual kt -> clipped kt -> GHI (kWh/m2/day), elementwise."""
-        k = self.cfg["kt"]
         ceil = None if np.all(np.isnan(kt_ceil)) else kt_ceil
-        kt = physical_clip(kt_bil + resid, ceil, float(k["max"]), float(k["clr_margin"]))
+        kt = physical_clip(kt_bil + resid, ceil, self.kt_max(),
+                           float(self.cfg["kt"]["clr_margin"]))
         return kt * toa

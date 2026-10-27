@@ -1,0 +1,5 @@
+# GOES window on the v2 anchored target, fold a (vista).
+extends: data_vista_goes.yaml
+
+run_group: data_store_goes_corr2_a
+target_var: nsrdb_ghi_corr_2a

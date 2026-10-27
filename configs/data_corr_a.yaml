@@ -1,0 +1,5 @@
+# Local twin of data_vista_corr_a.yaml (see there).
+extends: data.yaml
+
+run_group: data_store_corr_a
+target_var: nsrdb_ghi_corr_a

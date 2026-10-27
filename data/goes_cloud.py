@@ -28,10 +28,19 @@ scans at its ends carry zero weight. Outputs:
     goes_cf_am   same, scans before local solar noon
     goes_cf_pm   same, after
 
+Second product, ``--product cod`` (s3://noaa-goes16/ABI-L2-CODC, 4 km, daytime
+cloud optical depth tau). Clear pixels (DQF 6) count as tau = 0. Each pixel's
+tau becomes a two-stream cloud transmittance T = 1 / (1 + 0.75 (1 - g) tau),
+g = 0.85, which is roughly linear in the surface flux it removes; T is binned and
+sunlight-weighted exactly like the mask, giving goes_tcld / _am / _pm. Unlike
+the binary mask this says how much a cloud dims the surface, not only whether
+it is there.
+
 Usage (vista2):
     python -m data.goes_cloud days --start 2018-01-01 --end 2021-12-31 --workers 4
     python -m data.goes_cloud assemble        # daily npz -> one nc per year
     python -m data.goes_cloud add-to-store
+    python -m data.goes_cloud --product cod days --start 2018-01-01 --end 2021-12-31
 """
 from __future__ import annotations
 
@@ -48,13 +57,29 @@ from common import build_target_grid, load_config
 from common import regrid as rg
 from common.solar import cos_zenith
 
-BUCKET = "noaa-goes16/ABI-L2-ACMC"
+G_ASYM = 0.85
+
+
+def _bcm(ds) -> np.ndarray:
+    return ds["BCM"].values.astype("float64")
+
+
+def _transmittance(ds) -> np.ndarray:
+    tau = ds["COD"].values.astype("float64")
+    tau = np.where(ds["DQF"].values == 6, 0.0, tau)          # 6 = clear
+    return 1.0 / (1.0 + 0.75 * (1.0 - G_ASYM) * tau)
+
+
+# product -> (bucket, per-pixel field, raw subdir, output variable prefix)
+PRODUCTS = {"acm": ("noaa-goes16/ABI-L2-ACMC", _bcm, "goes", "goes_cf"),
+            "cod": ("noaa-goes16/ABI-L2-CODC", _transmittance, "goes_cod", "goes_tcld")}
+PRODUCT = "acm"
 MIN_COVERAGE = 0.5
 MIN_DAY_WEIGHT = 0.7          # fraction of the day's sunlight weight observed
 
 
 def _root(cfg) -> Path:
-    d = Path(cfg["store_root"]) / "raw" / "goes"
+    d = Path(cfg["store_root"]) / "raw" / PRODUCTS[PRODUCT][2]
     (d / "daily").mkdir(parents=True, exist_ok=True)
     return d
 
@@ -71,7 +96,7 @@ def day_keys(fs, day: pd.Timestamp) -> list[str]:
     keys = []
     for h in range(25):
         t = t0 + pd.Timedelta(hours=h)
-        pref = f"{BUCKET}/{t:%Y}/{t.dayofyear:03d}/{t:%H}/"
+        pref = f"{PRODUCTS[PRODUCT][0]}/{t:%Y}/{t.dayofyear:03d}/{t:%H}/"
         try:
             ks = fs.ls(pref)
         except FileNotFoundError:
@@ -117,7 +142,9 @@ _MAPPER = None          # one per worker process
 
 
 def process_day(args) -> str:
-    cfg, day = args
+    cfg, day, product = args
+    global PRODUCT
+    PRODUCT = product
     out = _root(cfg) / "daily" / f"{day:%Y%m%d}.npz"
     if out.exists():
         return "skip"
@@ -141,7 +168,7 @@ def process_day(args) -> str:
         except Exception:  # noqa: BLE001  (a corrupt scan is a missing scan)
             continue
         W, rows = mapper.get(ds)
-        bcm = ds["BCM"].values.astype("float64").ravel()[rows]
+        bcm = PRODUCTS[PRODUCT][1](ds).ravel()[rows]
         cf = rg.apply(W, bcm[None])[0].reshape(shape)
         cov = rg.apply(W, np.isfinite(bcm)[None].astype("float64"))[0].reshape(shape)
         cf = np.where(cov >= MIN_COVERAGE, cf, np.nan)
@@ -167,7 +194,8 @@ def run_days(cfg, start: str, end: str, workers: int) -> None:
     days = pd.date_range(start, end, freq="D")
     cfg = dict(cfg)
     with ProcessPoolExecutor(workers) as ex:
-        for i, msg in enumerate(ex.map(process_day, [(cfg, d) for d in days], chunksize=4)):
+        for i, msg in enumerate(ex.map(process_day, [(cfg, d, PRODUCT) for d in days],
+                                       chunksize=4)):
             if msg != "skip" and i % 20 == 0:
                 print(f"[goes] {i + 1}/{len(days)} {msg}", flush=True)
     print("[goes] days done", flush=True)
@@ -183,17 +211,18 @@ def assemble(cfg) -> None:
     for y, fs_ in sorted(by_year.items()):
         t = pd.to_datetime([f.stem for f in fs_], format="%Y%m%d")
         arrs = {k: np.stack([np.load(f)[k] for f in fs_]) for k in ("cf", "am", "pm")}
-        ds = xr.Dataset({f"goes_{'cf' if k == 'cf' else 'cf_' + k}": (("time", "y", "x"), v)
+        pre = PRODUCTS[PRODUCT][3]
+        ds = xr.Dataset({pre if k == "cf" else f"{pre}_{k}": (("time", "y", "x"), v)
                          for k, v in arrs.items()},
                         coords=dict(time=t, y=grid.y, x=grid.x))
-        ds.to_netcdf(root / f"goes_cf_{y}.nc")
+        ds.to_netcdf(root / f"{pre}_{y}.nc")
         print(f"[goes] {y}: {len(t)} days, NaN {100 * float(np.isnan(arrs['cf']).mean()):.1f}%")
 
 
 def add_to_store(cfg) -> None:
     store = cfg["dataset"]["out_zarr"]
     st = xr.open_zarr(store)
-    files = sorted(_root(cfg).glob("goes_cf_*.nc"))
+    files = sorted(_root(cfg).glob(f"{PRODUCTS[PRODUCT][3]}_*.nc"))
     g = xr.concat([xr.open_dataset(f) for f in files], "time").sortby("time")
     g = g.reindex(time=st.time.values)
     out = xr.Dataset({f"dyn_{k}": (("time", "y", "x"), g[k].values.astype("float32"))
@@ -209,6 +238,7 @@ def add_to_store(cfg) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--product", choices=sorted(PRODUCTS), default="acm")
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("days")
     d.add_argument("--start", required=True)
@@ -217,6 +247,7 @@ if __name__ == "__main__":
     sub.add_parser("assemble")
     sub.add_parser("add-to-store")
     a = ap.parse_args()
+    PRODUCT = a.product
     c = load_config("data")
     if a.cmd == "days":
         run_days(c, a.start, a.end, a.workers)
