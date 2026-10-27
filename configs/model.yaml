@@ -1,0 +1,20 @@
+# M2: Swin U-Net, the temperature backbone code (models/encoder_swin.py)
+# unchanged, but with a SHALLOWER configuration than the temperature runs.
+#
+# Why: plan 6 forbids training patches that straddle the holdout + 1 deg
+# buffer. On the 93 x 100 grid that buffer (1254 cells) leaves no 48 x 48
+# crop and 1173 32 x 32 crops (training/train_swin.crop_origins). The
+# temperature config (window 8, 4 stages) pads every input to a multiple of
+# 8 * 2^3 = 64 tokens = 128 px, so a 32 px crop would be 94% padding.
+# Window 4 with 3 stages needs multiples of 4 * 2^2 = 16 tokens = 32 px: a
+# 32 px crop fits exactly, and full-domain inference (93 x 100) pads only to
+# 96 x 128. in_channels is set at runtime from the feature track.
+patch_size: 2
+
+encoder:
+  embed_dim: 96
+  depths: [2, 2, 6]
+  num_heads: [3, 6, 12]
+  window_size: 4
+  mlp_ratio: 4.0
+  drop_path: 0.1

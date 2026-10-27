@@ -1,0 +1,9 @@
+# Local (workstation) twin of data_vista_goes.yaml: GOES-era window, same store.
+extends: data.yaml   # by filename, so the env override cannot recurse
+
+run_group: data_store_goes
+
+time:
+  train: ["2018-01-01", "2019-06-30"]
+  val:   ["2019-07-01", "2019-12-31"]
+  test:  ["2020-01-01", "2021-12-31"]

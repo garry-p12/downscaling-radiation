@@ -1,0 +1,11 @@
+# Tiny Swin for smoke runs on the synthetic store (CPU, minutes).
+# Same keys as model.yaml; select with --model-config model_tiny.
+patch_size: 2
+
+encoder:
+  embed_dim: 24
+  depths: [1, 1, 1]
+  num_heads: [2, 2, 2]
+  window_size: 4
+  mlp_ratio: 2.0
+  drop_path: 0.0

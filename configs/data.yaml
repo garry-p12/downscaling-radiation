@@ -1,0 +1,132 @@
+# Data config: NASA POWER daily shortwave (1 deg) -> 10 km, NSRDB target.
+#
+# The domain, fine grid and Austin holdout are copied from
+# downscaling-temperature configs/data_southcentral.yaml + data_base.yaml so the
+# radiation grid is bit-identical to the temperature grid (93 x 100 cells,
+# EPSG:5070, 10 km). Change them there and here together, or not at all.
+#
+# `${store_root}` is substituted from the top-level key (common/config.py).
+
+store_root: "data_store"
+
+domain:
+  name: southcentral
+  lon_min: -104.0
+  lon_max: -94.0
+  lat_min: 27.0
+  lat_max: 35.0
+
+grid:
+  target_crs: "EPSG:5070"
+  target_res_m: 10000        # plan 1: "0.1 deg on the same master grid" = this 10 km grid
+  # POWER solar parameters are CERES SYN1deg on a native 1 x 1 deg grid
+  # (verified 2026-10: a live POWER v10.0.0 regional response for
+  # ALLSKY_SFC_SW_DWN returns centres at x.5 deg, 1 deg apart; the POWER
+  # sources page states "primary solar resolution is a global 1 x 1 deg grid").
+  # That makes this a ~100 km -> 10 km problem (r ~ 10 per axis), twice the
+  # factor of the temperature task. Documentation only: the code reads the
+  # grid from the downloaded files and warns if it differs.
+  coarse_res_deg: 1.0
+
+# Austin spatial holdout. buffer_deg = one coarse (1 deg) cell, plan 6.
+holdout:
+  name: austin
+  lon_min: -98.6
+  lon_max: -97.0
+  lat_min: 29.7
+  lat_max: 31.0
+  buffer_deg: 1.0
+
+time:
+  # POWER solar switched from GEWEX SRB 4.0-IP to CERES SYN1deg Ed4.2 on
+  # 2001-01-01 (POWER "Data Sources" page) -> nothing before 2001 (plan 2.3).
+  # The tail of the POWER record is CERES FLASHFlux (low latency, ~3-4 months
+  # before present) — a SECOND source change; never put the last months of
+  # the record in any split.
+  # NSRDB aggregated v4.0.0 covers 1998-2025, but switches satellite generation
+  # (GOES-13/15 -> GOES-16/17) in 2018. data/check_discontinuity.py reports the
+  # yearly POWER-vs-NSRDB offset so a step there is visible before modelling.
+  train: ["2001-01-01", "2018-12-31"]
+  val:   ["2019-01-01", "2019-12-31"]
+  test:  ["2020-01-01", "2021-12-31"]
+
+sources:
+  power:
+    # Regional daily endpoint, one parameter per request (download_power.py).
+    # time_standard LST = local solar time daily totals, matching the solar
+    # day used for NSRDB and stations (common/daily.py). Do NOT use UTC.
+    community: "RE"            # RE -> kW-hr/m^2/day; AG -> MJ/m^2/day (converted)
+    time_standard: "LST"
+    pad_deg: 1.5               # > one coarse cell so bilinear is interior everywhere
+    out_dir: "${store_root}/raw/power"
+    # store variable name -> POWER parameter
+    parameters:
+      ghi: ALLSKY_SFC_SW_DWN
+      ghi_clr: CLRSKY_SFC_SW_DWN
+      kt: ALLSKY_KT
+      toa: TOA_SW_DWN
+      dhi: ALLSKY_SFC_SW_DIFF
+      albedo: ALLSKY_SRF_ALB
+      cloud: CLOUD_AMT
+      pw: PW                   # MERRA-2 precipitable water, Track B
+      aod: AOD_55              # MERRA-2 AOD 550 nm, Track B
+
+  nsrdb:
+    # NSRDB GOES aggregated v4.0.0: 4 km, 30 min, 1998-2025, public bucket,
+    # anonymous. One ~1.6 TB HDF5 per year; only the domain's columns are read
+    # (~4 GB/year/variable over the network).
+    uri: "s3://nrel-pds-nsrdb/GOES/aggregated/v4.0.0/nsrdb_{year}.h5"
+    variables: ["ghi"]         # add "dni", "dhi" for phase 7
+    # fill_flag in the AGGREGATED v4 product is not the native 0-8 code: it
+    # is 0-100 in steps of 100/28, i.e. the percent of contributing native
+    # samples that were gap-filled (checked 2026-10 on nsrdb_2020.h5 near
+    # Austin: ~20% of daylight samples are partly filled, ~4% are 100).
+    # Dropping every nonzero flag rejected 57% of days under the 10% daily
+    # rule. Samples with flag >= fill_flag_drop_at are dropped (plan 3.4);
+    # null keeps everything.
+    fill_flag_drop_at: 100
+    pad_deg: 0.25
+    stamp: "instant"           # PSM values are instantaneous at the stamp
+    out_dir: "${store_root}/raw/nsrdb"
+
+  statics:
+    # Reuse the temperature project's covariates, already on this exact grid:
+    # dem, coastal_dist, land_mask, land-cover fractions, terrain shape.
+    temperature_store: "../downscaling-temperature/data_store_sc/super/dataset.zarr"
+    import_channels: ["dem", "coastal_dist", "land_mask", "elev_std",
+                      "slope_mean", "northness", "eastness",
+                      "lc_water", "lc_developed", "lc_forest", "lc_shrub",
+                      "lc_herbaceous", "lc_cultivated", "lc_wetland"]
+    # Raw DEM (3 arcsec) for slope/aspect/horizon/sky-view, computed at
+    # `terrain_res_m` and averaged to the 10 km grid.
+    dem_tif: "../downscaling-temperature/data_store_sc/raw/dem/dem.tif"
+    terrain_res_m: 1000
+    horizon_azimuths: 16
+    horizon_max_km: 30
+    # Optional fine static albedo (e.g. MODIS MCD43 climatology GeoTIFF).
+    albedo_tif: null
+
+  dynamic:
+    # Track B fine-scale dynamic predictors (plan 2.4). Each entry is a
+    # pre-downloaded (time, lat, lon) netCDF stack — AppEEARS output for MODIS
+    # cloud fraction (MOD/MYD06 or MOD35, Terra+Aqua mean) and MAIAC AOD.
+    # Daily; regridded to 10 km by area-weighted binning. Never GOES products
+    # while NSRDB is the target (it is built from GOES clouds).
+    modis_cf: {path: null, variable: "cloud_fraction", scale: 1.0}
+    maiac_aod: {path: null, variable: "Optical_Depth_055", scale: 0.001}
+
+  stations:
+    # Independent truth — NEVER a training input. See data/stations.py.
+    # SURFRAD has no site in this domain and ARM SGP C1 (36.6 N) is north of
+    # it; both are kept as loaders but the in-domain truth is the Oklahoma
+    # Mesonet (south of 35 N) and Texas networks (generic CSV).
+    out_dir: "${store_root}/raw/stations"
+    mesonet_meta_url: "https://api.mesonet.org/index.php/export/station_location_soil_information"
+    mesonet_mts_url: "https://www.mesonet.org/data/public/mesonet/mts/{y}/{m}/{d}/{y}{m}{d}{stid}.mts"
+    generic_csv: []            # e.g. TexMesonet / West Texas Mesonet exports
+    max_missing_daylight: 0.10
+
+dataset:
+  out_zarr: "${store_root}/radiation.zarr"
+  cache_dir: "${store_root}/cache"
+  min_nsrdb_points: 3          # fine cells with fewer NSRDB points -> NaN target

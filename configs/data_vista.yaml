@@ -1,0 +1,12 @@
+# TACC Vista: same domain/grid/splits as data.yaml; data on $SCRATCH, statics
+# precomputed on the workstation (python -m data.statics statics.npz) because
+# the cluster has neither the temperature store nor the raw DEM.
+#
+#   DOWNSCALE_CONFIG_data=configs/data_vista.yaml python -m ...
+extends: data.yaml   # by filename, so the env override cannot recurse
+
+store_root: "/scratch/11755/gurup12/downscaling-radiation/data_store"
+
+sources:
+  statics:
+    precomputed: "/scratch/11755/gurup12/downscaling-radiation/statics.npz"

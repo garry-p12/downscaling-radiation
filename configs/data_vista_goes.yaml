@@ -1,0 +1,13 @@
+# GOES era (Track C): same store, same grid, same test years, shorter history.
+# GOES-16 ABI L2 cloud mask exists from 2018-01-01, so Track C can only train on
+# 2018+. Tracks A and B are retrained on the SAME window here, so the A/B/C
+# comparison isolates the inputs rather than mixing in 15 extra training years.
+# Contiguous blocks (plan 6); the test years match the main experiment.
+extends: data_vista.yaml   # by filename: the env override cannot recurse
+
+run_group: data_store_goes
+
+time:
+  train: ["2018-01-01", "2019-06-30"]
+  val:   ["2019-07-01", "2019-12-31"]
+  test:  ["2020-01-01", "2021-12-31"]

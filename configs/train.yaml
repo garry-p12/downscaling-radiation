@@ -1,0 +1,128 @@
+# Features, physical constraints, model training, evaluation.
+
+kt:
+  max: 0.85                  # plan 2.2: clip predictions to [0, ~0.85]
+  # Ceiling from POWER clear-sky: kt <= (CLRSKY / TOA) * clr_margin. The margin
+  # is > 1 because NSRDB clear-sky days can exceed CERES clear-sky (different
+  # aerosol), and a hard ceiling at 1.0 would clip real values.
+  clr_margin: 1.10
+
+features:
+  clim_smooth_days: 31       # wrapped rolling window on DOY climatologies
+  rolling: [3, 7]            # days; POWER kt rolling means
+  # Centred windows use POWER on neighbouring days. Legitimate for hindcast
+  # downscaling (POWER is the INPUT, never the target); set false for an
+  # operational (causal) product.
+  rolling_center: true
+  # Fill value strategy for training-only climatologies inside the holdout:
+  # Gaussian normalised convolution from training pixels, sigma in km.
+  holdout_fill_sigma_km: 40
+  # Track A: POWER + static covariates (honest lower bound).
+  track_A:
+    - kt_bilinear
+    - kt_coarse_cell
+    - kt_clr_ratio
+    - kt_anom
+    - kt_roll3
+    - kt_roll7
+    - dem
+    - dem_anom
+    - slope
+    - aspect_sin
+    - aspect_cos
+    - svf
+    - elev_std
+    - coastal_dist
+    - lc_water
+    - lc_developed
+    - lc_forest
+    - lc_shrub
+    - lc_herbaceous
+    - lc_cultivated
+    - lc_wetland
+    - albedo
+    - kt_clim_fine
+    - doy_sin
+    - doy_cos
+    - lat
+    - lon
+  # Track B: Track A + dynamic atmosphere/cloud. Missing sources are dropped
+  # with a warning, so Track B degrades to "A + POWER PW/AOD" until MODIS is
+  # downloaded. GOES-derived inputs are deliberately absent.
+  track_B_extra:
+    - modis_cf              # MODIS 1 km cloud state -> 10 km fraction (data/modis_cloud.py)
+    - modis_cf_terra        # ~10:30 overpass
+    - modis_cf_aqua         # ~13:30 overpass (NaN before 2002-07-04)
+    - maiac_aod
+    - power_pw
+    - power_aod
+    - power_cloud
+  # Track C: Track B + GOES-16 cloud mask, sunlight-weighted daily (2018+).
+  # FLAGGED: NSRDB is built from GOES; Track C must be judged against ground
+  # stations (evaluation/evaluate.station_eval: nsrdb_mimicry), not NSRDB alone.
+  track_C_extra:
+    - goes_cf
+    - goes_cf_am
+    - goes_cf_pm
+
+xgboost:
+  n_rows: 3000000            # training rows (pixel-days) after subsampling
+  n_dev_rows: 500000
+  # Stratify the subsample by POWER (input) sky class, NOT by the target's:
+  # sampling on the target would bias E[y | X]; sampling on X does not.
+  stratify_on: kt_bilinear
+  # Loss in kt space; weight: none | toa | energy (= MSE in kWh space).
+  # `auto` trains all three and keeps the best dev RMSE in kWh/m2/day.
+  loss_weight: auto
+  params:
+    tree_method: hist
+    max_depth: 8
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 50
+    reg_lambda: 1.0
+  num_boost_round: 2000
+  early_stopping_rounds: 50
+  shap_rows: 20000
+  seed: 0
+
+swin:
+  crop: 32                   # must fit outside holdout+buffer: 48 has no such origin on the real grid
+  batch_size: 16
+  epochs: 40
+  lr: 2.0e-4
+  weight_decay: 0.05
+  # Loss: mse_kt | mse_toa (TOA-weighted kt) | mse_energy (kWh space).
+  loss: mse_kt
+  # Texture (evaluation/structure.py): pixel_loss mse | amse (Subich et al.
+  # 2025 spectral amplitude + coherence; ignores `loss` weighting), plus an
+  # optional 1 - SSIM term on the kt field.
+  pixel_loss: mse
+  # Default 0.2 since 2026-10-22: in-region (temporal cell) SSIM 0.695 -> 0.715,
+  # residual corr 0.457 -> 0.482, fine-band texture correlation x2, RMSE unchanged
+  # (0.367 -> 0.368). Accepted cost: +6% (both) / +11% (spatial) RMSE on the
+  # unseen holdout. AMSE was tested and rejected (adds misplaced texture).
+  ssim_weight: 0.2
+  quantiles: null            # M3: [0.1, 0.5, 0.9]
+  # Soft coarse-cell consistency (plan 5): block mean of predicted kt vs
+  # POWER kt + mean training offset. Soft only; 0 disables.
+  consistency_weight: 0.0
+  num_workers: 0
+  seed: 0
+
+eval:
+  spatial_split: train
+  spatial_day_stride: 7
+  sky_bins: [0.3, 0.65]      # overcast < 0.3 <= partly < 0.65 <= clear (target kt)
+  # Terrain class: rough if 1 km elevation std within the cell exceeds this (m).
+  # Picks out the Hill Country escarpment and Trans-Pecos.
+  rough_elev_std_m: 60
+  coastal_km: 50
+
+logging:
+  wandb:
+    enabled: false
+    project: downscaling-radiation
+    mode: online
+  out_dir: "runs"

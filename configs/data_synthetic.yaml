@@ -1,0 +1,29 @@
+# Synthetic store for smoke-testing the whole pipeline offline.
+#
+#   DOWNSCALE_CONFIG_data=configs/data_synthetic.yaml python -m data.synthetic
+#   DOWNSCALE_CONFIG_data=configs/data_synthetic.yaml python -m scripts.run_pipeline
+#
+# Small domain (4 x 4 deg), 5 years, same code paths as the real build.
+extends: data.yaml   # by filename: a bare stem would re-resolve through DOWNSCALE_CONFIG_data to this file
+
+store_root: "data_store_synth"
+
+domain:
+  name: synth
+  lon_min: -99.5
+  lon_max: -95.5
+  lat_min: 28.5
+  lat_max: 32.5
+
+holdout:
+  name: austin
+  lon_min: -98.2
+  lon_max: -97.2
+  lat_min: 30.0
+  lat_max: 30.9
+  buffer_deg: 0.5
+
+time:
+  train: ["2015-01-01", "2017-12-31"]
+  val:   ["2018-01-01", "2018-12-31"]
+  test:  ["2019-01-01", "2019-12-31"]

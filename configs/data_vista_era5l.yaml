@@ -1,0 +1,7 @@
+# Target-swap experiment: identical inputs, splits and models to the main
+# window, but trained against ERA5-Land ssrd instead of NSRDB. Judged at USCRN
+# with per-target mimicry (evaluation/evaluate.station_eval).
+extends: data_vista.yaml   # by filename: the env override cannot recurse
+
+run_group: data_store_era5l
+target_var: era5l_ghi
