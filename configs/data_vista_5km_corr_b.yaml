@@ -1,0 +1,5 @@
+# 5 km, GOES window, trained on the v1 (USCRN-only) anchored target, fold b.
+extends: data_vista_5km.yaml
+
+run_group: data_store_5km_corr_b
+target_var: nsrdb_ghi_corr_b

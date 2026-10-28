@@ -63,6 +63,13 @@ def _raw_dir(cfg) -> Path:
         "raw_dir", Path(cfg["store_root"]) / "raw" / "modis"))
 
 
+def _fine_dir(cfg) -> Path:
+    """Where the per-grid fractions go: beside the raw tiles by default, or a
+    per-grid directory (``fine_dir``) when several grids share one raw download."""
+    d = cfg["sources"]["dynamic"]["modis_cf"].get("fine_dir")
+    return Path(d) if d else _raw_dir(cfg) / "fine"
+
+
 def aggregate_file(path: Path, grid, W=None, chunk: int = 32):
     """One AppEEARS netCDF -> (times, fine (T, ny, nx) float32, W)."""
     ds = xr.open_dataset(path, mask_and_scale=False, decode_times=True)
@@ -87,8 +94,8 @@ def aggregate_file(path: Path, grid, W=None, chunk: int = 32):
 
 def aggregate(cfg) -> None:
     raw = _raw_dir(cfg)
-    fine = raw / "fine"
-    fine.mkdir(exist_ok=True)
+    fine = _fine_dir(cfg)
+    fine.mkdir(parents=True, exist_ok=True)
     grid = build_target_grid(cfg["domain"], cfg["grid"])
     W = None
     for d in sorted(p for p in raw.iterdir() if p.is_dir() and (p / "DONE").exists()):
@@ -111,34 +118,38 @@ def aggregate(cfg) -> None:
 
 
 def add_to_store(cfg) -> None:
+    """Terra, Aqua and their mean as dyn_modis_cf_*. One satellite in memory at
+    a time and the mean computed lazily chunk by chunk from the store: at 5 km
+    the stacked pair over 2001-2021 does not fit a login node."""
+    from data.build_store import append_to_store
+
     store = cfg["dataset"]["out_zarr"]
     ds = xr.open_zarr(store)
     times = pd.DatetimeIndex(ds.time.values)
-    fine = _raw_dir(cfg) / "fine"
-    new = {}
+    fine = _fine_dir(cfg)
+    chunks = {"time": ds.chunks["time"][0]}
+    have = []
     for sat in ("terra", "aqua"):
         files = sorted(fine.glob(f"modis_cf_{sat}_*.nc"))
         if not files:
             print(f"[modis] no {sat} files; skipped")
             continue
         da = xr.concat([xr.open_dataarray(f) for f in files], "time").sortby("time")
-        new[f"dyn_modis_cf_{sat}"] = da.reindex(time=times).astype("float32")
-    if not new:
+        v = da.reindex(time=times).values.astype("float32")
+        name = f"dyn_modis_cf_{sat}"
+        append_to_store(xr.Dataset({name: (("time", "y", "x"), v)}).chunk(chunks), store)
+        print(f"[modis] {name}: NaN {100 * float(np.isnan(v).mean()):.1f}%", flush=True)
+        have.append(name)
+        del v, da
+    if not have:
         raise SystemExit("[modis] nothing to add")
-    stack = np.stack([v.values for v in new.values()])
-    with np.errstate(invalid="ignore"):
-        mean = np.nanmean(stack, axis=0)
-    new["dyn_modis_cf"] = xr.DataArray(mean.astype("float32"), dims=("time", "y", "x"))
-    out = xr.Dataset({k: (("time", "y", "x"), v.values if hasattr(v, "values") else v)
-                      for k, v in new.items()},
-                     coords=dict(time=ds.time.values, y=ds.y.values, x=ds.x.values))
-    out = out.chunk({"time": ds.chunks["time"][0]})
-    from data.build_store import append_to_store
-
-    append_to_store(out.drop_vars(["time", "y", "x"]), store)
-    for k, v in new.items():
-        arr = v.values if hasattr(v, "values") else v
-        print(f"[modis] {k}: NaN {100 * float(np.isnan(arr).mean()):.1f}%", flush=True)
+    st = xr.open_zarr(store)
+    pair = [st[k] for k in have]
+    n = sum(p.notnull() for p in pair)
+    mean = (sum(p.fillna(0) for p in pair) / n.where(n > 0)).astype("float32")
+    append_to_store(xr.Dataset({"dyn_modis_cf": mean.drop_vars(
+        [c for c in mean.coords if c in ("time", "y", "x")])}), store)
+    print("[modis] dyn_modis_cf: mean of " + " + ".join(have), flush=True)
 
 
 if __name__ == "__main__":

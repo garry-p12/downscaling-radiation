@@ -225,15 +225,15 @@ def add_to_store(cfg) -> None:
     files = sorted(_root(cfg).glob(f"{PRODUCTS[PRODUCT][3]}_*.nc"))
     g = xr.concat([xr.open_dataset(f) for f in files], "time").sortby("time")
     g = g.reindex(time=st.time.values)
-    out = xr.Dataset({f"dyn_{k}": (("time", "y", "x"), g[k].values.astype("float32"))
-                      for k in g.data_vars},
-                     coords=dict(time=st.time.values, y=st.y.values, x=st.x.values))
-    out = out.chunk({"time": st.chunks["time"][0]})
     from data.build_store import append_to_store
 
-    append_to_store(out.drop_vars(["time", "y", "x"]), store)
-    for k in out.data_vars:
-        print(f"[goes] {k}: NaN {100 * float(np.isnan(out[k].values).mean()):.1f}%")
+    # One variable at a time: three full-period 5 km stacks do not fit a login node.
+    for k in g.data_vars:
+        v = g[k].values.astype("float32")
+        append_to_store(xr.Dataset({f"dyn_{k}": (("time", "y", "x"), v)}).chunk(
+            {"time": st.chunks["time"][0]}), store)
+        print(f"[goes] dyn_{k}: NaN {100 * float(np.isnan(v).mean()):.1f}%", flush=True)
+        del v
 
 
 if __name__ == "__main__":

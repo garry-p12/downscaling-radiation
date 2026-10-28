@@ -1,0 +1,8 @@
+# 5 km store with the main-window splits (train 2001-2018), used only to fit
+# the station-anchoring error models on the same station-days as at 10 km.
+extends: data_vista_5km.yaml
+
+time:
+  train: ["2001-01-01", "2018-12-31"]
+  val:   ["2019-01-01", "2019-12-31"]
+  test:  ["2020-01-01", "2021-12-31"]

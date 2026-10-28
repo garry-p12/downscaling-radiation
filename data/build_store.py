@@ -54,7 +54,11 @@ def nsrdb_to_grid(da: xr.DataArray, grid, cache_dir: str | None,
     W = rg.cached(Path(cache_dir) / f"nsrdb_bin_{key}.npz", build) if cache_dir \
         else build()
     _, counts = rg.binning_matrix(px, py, grid)
-    out = rg.apply(W, da.values, out_shape=grid.shape).astype("float32")
+    # In blocks of days: the whole float64 stack does not fit a login node at 5 km.
+    out = np.empty((da.sizes["time"], *grid.shape), "float32")
+    for s in range(0, da.sizes["time"], 500):
+        blk = da.isel(time=slice(s, s + 500)).values
+        out[s:s + len(blk)] = rg.apply(W, blk, out_shape=grid.shape)
     return out, counts
 
 

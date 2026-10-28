@@ -48,6 +48,136 @@ def import_temperature_statics(store: str, channels: list[str],
     return out
 
 
+# NLCD Level-1 groups, as in the temperature project's data/covariates.py, so
+# natively built fractions mean the same thing as the imported 10 km ones.
+NLCD_GROUPS = {
+    "lc_water": (11, 12),
+    "lc_developed": (21, 22, 23, 24),
+    "lc_forest": (41, 42, 43),
+    "lc_shrub": (51, 52),
+    "lc_herbaceous": (71, 72, 73, 74),
+    "lc_cultivated": (81, 82),
+    "lc_wetland": (90, 95),
+}
+
+
+def _aggregate(src: np.ndarray, transform, crs, grid: TargetGrid) -> np.ndarray:
+    """Area-average a native raster onto the grid; NaN source pixels are skipped."""
+    from rasterio.transform import from_origin
+    from rasterio.warp import Resampling, reproject
+
+    out = np.full(grid.shape, np.nan, dtype="float32")
+    reproject(np.ascontiguousarray(src, dtype="float32"), out, src_transform=transform,
+              src_crs=crs, src_nodata=np.nan,
+              dst_transform=from_origin(grid.x[0] - grid.res_m / 2, grid.y[0] + grid.res_m / 2,
+                                        grid.res_m, grid.res_m),
+              dst_crs=grid.crs, dst_nodata=np.nan, resampling=Resampling.average)
+    return out
+
+
+def landcover_fractions(path: str, grid: TargetGrid) -> dict[str, np.ndarray]:
+    """Fraction of each cell in each NLCD group, from the native (~200 m) raster.
+    Code 0 / nodata (outside NLCD: Mexico, open Gulf) is left out of the
+    denominator, so a coastal cell reports the composition of its covered part."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        codes, transform, crs, nodata = src.read(1), src.transform, src.crs, src.nodata
+    valid = (codes != 0) if nodata is None else (codes != nodata) & (codes != 0)
+    out = {}
+    for name, cls in NLCD_GROUPS.items():
+        m = np.isin(codes, cls).astype("float32")
+        m[~valid] = np.nan
+        out[name] = _aggregate(m, transform, crs, grid)
+    return out
+
+
+def coastal_distance(path: str, grid: TargetGrid, pad_deg: float = 8.0) -> np.ndarray:
+    """Distance (km) from each cell centre to the nearest coastline segment."""
+    import geopandas as gpd
+    import shapely
+
+    lat, lon = grid.latlon()
+    bbox = (float(lon.min()) - pad_deg, float(lat.min()) - pad_deg,
+            float(lon.max()) + pad_deg, float(lat.max()) + pad_deg)
+    line = gpd.read_file(path, bbox=bbox).to_crs(grid.crs).geometry.union_all()
+    xx, yy = np.meshgrid(grid.x, grid.y)
+    d = shapely.distance(shapely.points(xx.ravel(), yy.ravel()), line)
+    return (d.reshape(grid.shape) / 1000.0).astype("float32")
+
+
+def dem_moments(path: str, grid: TargetGrid) -> tuple[np.ndarray, np.ndarray]:
+    """Cell mean elevation and the std of the native (~90 m) DEM within the cell:
+    sub-grid relief, the temperature project's ``elev_std``."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        z, transform, crs = src.read(1).astype("float32"), src.transform, src.crs
+        if src.nodata is not None:
+            z[z == src.nodata] = np.nan
+    m1 = _aggregate(z, transform, crs, grid)
+    m2 = _aggregate(z * z, transform, crs, grid)
+    return m1, np.sqrt(np.clip(m2 - m1 ** 2, 0, None)).astype("float32")
+
+
+def mosaic_dem(tiles: str, out: str, res_deg: float = 1 / 1200) -> None:
+    """Average-resample DEM tiles (e.g. Copernicus 1 arcsec) to one ``res_deg``
+    GeoTIFF (default 3 arcsec, ~90 m): the input every DEM-derived static uses."""
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.merge import merge
+
+    srcs = [rasterio.open(p) for p in sorted(Path(tiles).glob("*.tif"))]
+    arr, transform = merge(srcs, res=res_deg, resampling=Resampling.average, nodata=-9999)
+    prof = dict(driver="GTiff", height=arr.shape[1], width=arr.shape[2], count=1,
+                dtype="float32", crs=srcs[0].crs, transform=transform, nodata=-9999,
+                compress="deflate", tiled=True)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(out, "w", **prof) as dst:
+        dst.write(arr[0].astype("float32"), 1)
+    print(f"[statics] DEM mosaic {arr.shape[1:]} from {len(srcs)} tiles -> {out}")
+
+
+def land_mask_from(spec: dict, grid: TargetGrid) -> np.ndarray:
+    """``spec = {npz, res_m}``: another grid's land mask over the same domain,
+    looked up at this grid's cell centres (both grids share the domain's
+    north-west corner, so a 5 km cell lies inside exactly one 10 km cell)."""
+    lm = np.load(spec["npz"])["land_mask"]
+    r = float(spec["res_m"])
+    x0, y0 = grid.x[0] - grid.res_m / 2, grid.y[0] + grid.res_m / 2
+    col = np.clip(((grid.x - x0) // r).astype(int), 0, lm.shape[1] - 1)
+    row = np.clip(((y0 - grid.y) // r).astype(int), 0, lm.shape[0] - 1)
+    return lm[np.ix_(row, col)].astype("float32")
+
+
+def native_statics(sc: dict, grid: TargetGrid) -> dict[str, np.ndarray]:
+    """Land cover, coastal distance, land mask, dem and elev_std built from the
+    raw rasters on ANY grid (the temperature store exists only at 10 km)."""
+    out: dict[str, np.ndarray] = {}
+    if sc.get("landcover_tif") and Path(sc["landcover_tif"]).exists():
+        out.update(landcover_fractions(sc["landcover_tif"], grid))
+        out["land_mask"] = (np.isfinite(out["lc_water"]) & (out["lc_water"] < 0.5)).astype("float32")
+    if sc.get("land_mask_from"):
+        # Same land area as another grid's statics (e.g. 10 km), so results on
+        # the two grids are scored over the same cells. NLCD stops at the
+        # border; that grid's mask includes northern Mexico.
+        out["land_mask"] = land_mask_from(sc["land_mask_from"], grid)
+    # Cells outside NLCD (Mexico) take the composition of the nearest covered
+    # cell, as the temperature store's gap fill does.
+    gaps = np.isnan(out.get("lc_water", np.zeros(1)))
+    if gaps.any() and (~gaps).any():
+        from scipy import ndimage
+
+        idx = ndimage.distance_transform_edt(gaps, return_distances=False, return_indices=True)
+        for k in NLCD_GROUPS:
+            out[k] = out[k][tuple(idx)]
+    if sc.get("coastline_shp") and Path(sc["coastline_shp"]).exists():
+        out["coastal_dist"] = coastal_distance(sc["coastline_shp"], grid)
+    if sc.get("dem_tif") and Path(sc["dem_tif"]).exists():
+        out["dem"], out["elev_std"] = dem_moments(sc["dem_tif"], grid)
+    return out
+
+
 def _subgrid(grid: TargetGrid, res_m: float):
     f = int(round(grid.res_m / res_m))
     if f < 1 or not np.isclose(grid.res_m / f, res_m):
@@ -122,6 +252,8 @@ def build_statics(cfg, grid: TargetGrid) -> dict[str, np.ndarray]:
     if ts and Path(ts).exists():
         out.update(import_temperature_statics(ts, list(sc.get("import_channels", [])),
                                               grid))
+    elif sc.get("landcover_tif") or sc.get("coastline_shp"):
+        out.update(native_statics(sc, grid))
     else:
         warnings.warn(f"[statics] temperature store {ts!r} not found; land cover "
                       "and coastal distance will be missing")
@@ -171,4 +303,10 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="precompute statics to .npz")
     ap.add_argument("out")
-    save_statics(load_config("data"), ap.parse_args().out)
+    ap.add_argument("--mosaic-dem", metavar="TILES_DIR", default=None,
+                    help="instead: mosaic DEM tiles to OUT (3 arcsec GeoTIFF)")
+    a = ap.parse_args()
+    if a.mosaic_dem:
+        mosaic_dem(a.mosaic_dem, a.out)
+    else:
+        save_statics(load_config("data"), a.out)

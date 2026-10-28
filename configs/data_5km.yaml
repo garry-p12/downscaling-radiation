@@ -1,0 +1,41 @@
+# 5 km grid (local). Same domain, CRS and holdout as the 10 km grid, half the
+# cell size, so every 10 km cell is exactly 2 x 2 of these cells (both grids
+# snap their outer edges to multiples of their resolution from the same bbox).
+# GOES window splits: optical depth, the input that carries sub-10 km cloud
+# detail, exists only from 2018.
+#
+# Raw downloads that are resolution-free (POWER, NSRDB point series, MODIS
+# 1 km tiles) are shared with the 10 km store; everything binned to the grid
+# (GOES daily fields, MODIS fractions, statics, the store) lives under the
+# 5 km store_root.
+extends: data_goes.yaml
+
+store_root: "data_store_5km"
+run_group: data_store_5km
+
+grid:
+  target_res_m: 5000
+
+sources:
+  power:
+    out_dir: "data_store/raw/power"
+  nsrdb:
+    out_dir: "data_store/raw/nsrdb"
+  stations:
+    # stations.csv holds grid row/col, so the 5 km copy has its own (see
+    # data/stations.py regrid-meta); station_daily.csv is the same file.
+    out_dir: "${store_root}/raw/stations"
+  statics:
+    # The temperature store is 10 km only; build every static natively.
+    temperature_store: null
+    dem_tif: "data_store/raw/dem/dem_3s.tif"
+    landcover_tif: "../downscaling-temperature/data_store_sc/raw/landcover/landcover.tif"
+    coastline_shp: "data_store/raw/coastline/ne_10m_coastline.shp"
+  dynamic:
+    modis_cf:
+      raw_dir: "data_store/raw/modis"
+      fine_dir: "${store_root}/raw/modis_fine"
+
+dataset:
+  # A 4 km NSRDB grid puts ~1.5 points in a 5 km cell; at 10 km it was ~6.
+  min_nsrdb_points: 1

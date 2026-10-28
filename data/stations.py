@@ -396,6 +396,24 @@ def build(cfg) -> None:
     print(meta.groupby("region").size().rename("stations per region").to_string())
 
 
+def regrid_meta(cfg, src_dir: str) -> None:
+    """Copy built station tables from another grid's ``out_dir`` and redo only
+    the grid mapping (row/col/region) for this config's grid: the daily totals
+    do not depend on the grid, the pixel a station falls in does."""
+    import shutil
+
+    src, dst = Path(src_dir), Path(cfg["sources"]["stations"]["out_dir"])
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / "station_daily.csv", dst / "station_daily.csv")
+    meta = pd.read_csv(src / "stations.csv")
+    grid = build_target_grid(cfg["domain"], cfg["grid"])
+    meta = map_to_grid(meta.drop(columns=["row", "col", "in_grid", "region"], errors="ignore"),
+                       grid, cfg["holdout"])
+    meta.to_csv(dst / "stations.csv", index=False)
+    print(f"[stations] {len(meta)} stations remapped to {grid.shape} grid -> {dst}")
+    print(meta.groupby("region").size().rename("stations per region").to_string())
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -404,11 +422,15 @@ if __name__ == "__main__":
     u = sub.add_parser("download-uscrn")
     u.add_argument("--years", type=int, nargs="+", required=True)
     sub.add_parser("build")
+    rm = sub.add_parser("regrid-meta")
+    rm.add_argument("--from", dest="src", required=True, help="out_dir of another grid")
     a = ap.parse_args()
     c = load_config("data")
     if a.cmd == "download-mesonet":
         download_mesonet(c, a.years)
     elif a.cmd == "download-uscrn":
         download_uscrn(c, a.years)
+    elif a.cmd == "regrid-meta":
+        regrid_meta(c, a.src)
     else:
         build(c)

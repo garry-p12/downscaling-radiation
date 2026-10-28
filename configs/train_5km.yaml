@@ -1,0 +1,7 @@
+# 5 km grid: same physical context per Swin crop as at 10 km (64 x 5 km =
+# 32 x 10 km = 320 km), so the two resolutions differ in cell size, not in how
+# much of the weather a training sample sees. Everything else as train.yaml.
+extends: train.yaml
+
+swin:
+  crop: 64

@@ -1,0 +1,21 @@
+# TACC Vista twin of data_5km.yaml: data on $SCRATCH. Statics are built here
+# from the raw rasters on scratch (python -m data.statics <precomputed path>)
+# and then read back from that .npz by build_store.
+extends: data_5km.yaml
+
+store_root: "/scratch/11755/gurup12/downscaling-radiation/data_store_5km"
+
+sources:
+  power:
+    out_dir: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/power"
+  nsrdb:
+    out_dir: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/nsrdb"
+  statics:
+    precomputed: "/scratch/11755/gurup12/downscaling-radiation/statics_5km.npz"
+    dem_tif: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/dem/dem_3s.tif"
+    landcover_tif: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/landcover/landcover.tif"
+    coastline_shp: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/coastline/ne_10m_coastline.shp"
+    land_mask_from: {npz: "/scratch/11755/gurup12/downscaling-radiation/statics.npz", res_m: 10000}
+  dynamic:
+    modis_cf:
+      raw_dir: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/modis"

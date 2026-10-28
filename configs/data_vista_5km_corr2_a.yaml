@@ -1,0 +1,5 @@
+# 5 km, GOES window, trained on the v2 (both networks) anchored target, fold a.
+extends: data_vista_5km.yaml
+
+run_group: data_store_5km_corr2_a
+target_var: nsrdb_ghi_corr_2a

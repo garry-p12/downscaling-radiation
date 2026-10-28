@@ -297,8 +297,13 @@ def run_krige(fb, dcfg, tcfg, out: Path, pairs: Path | None) -> pd.DataFrame:
     return tab
 
 
-def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = False) -> None:
-    """Corrected target from an error model fit WITHOUT the fold's stations."""
+def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = False,
+                 fit_net: str | None = None, start: str | None = None) -> None:
+    """Corrected target from an error model fit WITHOUT the fold's stations.
+
+    ``fit_net`` restricts the fit to one network (v1 used USCRN only, before
+    the Mesonet joined the station table); ``start`` corrects only days from
+    that date on (the rest stay NaN), for stores trained on a later window."""
     import xarray as xr
     import xgboost as xgb
 
@@ -307,13 +312,16 @@ def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = 
     df = station_table(fb, dcfg)
     names = fb.track("B")
     keep = (~df.station_id.isin(exclude) & (df.split == "train")).values
+    if fit_net:
+        keep &= (df.network == fit_net).values
     X = features(fb, df[keep], names)
     y = err_target(df, centred)[keep]
     bst = fit_err_model(X, y)
     T = len(fb.times)
     corr = np.full_like(fb.ghi, np.nan)
     vp = np.nonzero(fb.valid.ravel())[0]
-    for t in range(T):
+    t0 = int(np.searchsorted(fb.times, np.datetime64(start))) if start else 0
+    for t in range(t0, T):
         dd = pd.DataFrame({"t": t, "pix": vp, "target": fb.ghi[t].ravel()[vp],
                            "norm": fb.norm(t).ravel()[vp]})
         ok = np.isfinite(dd.target.values)
@@ -475,6 +483,8 @@ if __name__ == "__main__":
     b.add_argument("--exclude", nargs="+", required=True)
     b.add_argument("--fold", required=True)
     b.add_argument("--centred", action="store_true")
+    b.add_argument("--fit-net", default=None, help="fit on one network only (v1: uscrn)")
+    b.add_argument("--start", default=None, help="correct only days from this date")
     a = ap.parse_args()
     import xgboost  # noqa: F401  (before torch: macOS OpenMP clash)
 
@@ -506,7 +516,7 @@ if __name__ == "__main__":
     elif a.cmd == "krige":
         t = run_krige(fb, dcfg, tcfg, out, Path(a.pairs) if a.pairs else None)
     else:
-        build_target(fb, dcfg, tcfg, a.exclude, a.fold, a.centred)
+        build_target(fb, dcfg, tcfg, a.exclude, a.fold, a.centred, a.fit_net, a.start)
         raise SystemExit
     print(t[t.station_id.str.startswith("all")].round(4).to_string(index=False))
     print(t[t.station_id != "all"].pivot(index="station_id", columns="model",

@@ -1,0 +1,13 @@
+# Check of the native statics path (data/statics.native_statics): the 10 km
+# grid built from the raw rasters instead of the temperature store, compared
+# with the store's imported statics before the same code is trusted at 5 km.
+extends: data_vista.yaml
+
+sources:
+  statics:
+    temperature_store: null
+    precomputed: "/scratch/11755/gurup12/downscaling-radiation/statics_native10.npz"
+    dem_tif: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/dem/dem_3s.tif"
+    landcover_tif: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/landcover/landcover.tif"
+    coastline_shp: "/scratch/11755/gurup12/downscaling-radiation/data_store/raw/coastline/ne_10m_coastline.shp"
+    land_mask_from: {npz: "/scratch/11755/gurup12/downscaling-radiation/statics.npz", res_m: 10000}
