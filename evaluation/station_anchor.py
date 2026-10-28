@@ -161,6 +161,88 @@ def run_errmodel(fb, dcfg, tcfg, out: Path, fit_net: str | None = None,
     return tab
 
 
+def _dist_km(ll: np.ndarray) -> np.ndarray:
+    """Great-circle distances (km) between (lat, lon) rows."""
+    la, lo = np.radians(ll[:, 0]), np.radians(ll[:, 1])
+    return 6371.0 * np.arccos(np.clip(np.sin(la[:, None]) * np.sin(la[None]) + np.cos(la[:, None])
+                                      * np.cos(la[None]) * np.cos(lo[:, None] - lo[None]), -1, 1))
+
+
+def _boot_ci(df: pd.DataFrame, cols: list[str], boot: int, seed: int = 0) -> dict:
+    """90% week-block bootstrap interval of centred skill vs B1, per column."""
+    rng = np.random.default_rng(seed)
+    week = df.date.values.astype("datetime64[W]")
+    wk = np.unique(week)
+    idx = {w: np.nonzero(week == w)[0] for w in wk}
+    draws = {c: [] for c in cols}
+    for _ in range(boot):
+        g = df.iloc[np.concatenate([idx[w] for w in rng.choice(wk, wk.size)])]
+        ref = _centred_mse(g, "B1")
+        for c in cols:
+            draws[c].append(1 - _centred_mse(g, c) / ref)
+    return {c: np.percentile(v, [5, 95]) for c, v in draws.items()}
+
+
+def run_buffered(fb, dcfg, tcfg, out: Path, radii: list[float], boot: int = 300) -> pd.DataFrame:
+    """Spatial-leakage test of the error model behind the anchored target.
+
+    Leave-one-station-out with an exclusion buffer: for each held-out station,
+    every station within R km is also dropped from the fit, so the correction
+    cannot borrow a near neighbour's error. R = 0 is plain LOSO. The v2 folds
+    (latitude-interleaved) are scored alongside: if their skill matches
+    large-R skill, the folds do not flatter the anchored models."""
+    import xgboost as xgb
+
+    df = station_table(fb, dcfg)
+    X = features(fb, df, fb.track("B"))
+    y = err_target(df, False)
+    train, test = (df.split == "train").values, (df.split == "test").values
+    ids = sorted(df.station_id.unique())
+    pos = {s: i for i, s in enumerate(ids)}
+    dist = _dist_km(df.groupby("station_id")[["lat", "lon"]].first().loc[ids].values)
+    sid = df.station_id.map(pos).values
+    cols = []
+    for R in radii:
+        c = f"R{int(R)}"
+        cols.append(c)
+        df[c] = np.nan
+        for i, s in enumerate(ids):
+            drop = dist[i] <= max(R, 0.1)            # itself plus neighbours within R
+            sel = test & (sid == i)
+            fit = train & ~drop[sid]
+            if not sel.any():
+                continue
+            bst = fit_err_model(X[fit], y[fit])
+            df.loc[sel, c] = df.target.values[sel] + bst.predict(xgb.DMatrix(X[sel])) * df.norm.values[sel]
+            print(f"[buffer] R={int(R)} {s}: fit on {len(ids) - int(drop.sum())} stations", flush=True)
+    df["fold2"] = np.nan
+    for f, other in (("a", "b"), ("b", "a")):
+        held = df.station_id.isin(FOLDS2[f]).values
+        bst = fit_err_model(X[train & df.station_id.isin(FOLDS2[other]).values],
+                            y[train & df.station_id.isin(FOLDS2[other]).values])
+        sel = test & held
+        df.loc[sel, "fold2"] = df.target.values[sel] + bst.predict(xgb.DMatrix(X[sel])) * df.norm.values[sel]
+    cols.append("fold2")
+    # nearest other station: how far each held-out station is from the fit set
+    nn = np.sort(dist, axis=1)[:, 1]
+    d = df[test].rename(columns={"target": "NSRDB"}).dropna(subset=["NSRDB", "B1", *cols])
+    d["date"] = pd.DatetimeIndex(fb.times)[d.t.values]
+    models = ["NSRDB", *cols]
+    rows = []
+    for net, g in [("all", d)] + list(d.groupby("network")):
+        tab = scores(g, models + ["B1"]).query("station_id == 'all'").assign(network=net)
+        ci = _boot_ci(g, models, boot)
+        tab["skill_lo90"] = [ci[m][0] if m in ci else np.nan for m in tab.model]
+        tab["skill_hi90"] = [ci[m][1] if m in ci else np.nan for m in tab.model]
+        rows.append(tab)
+    per = scores(d, models + ["B1"]).query("station_id != 'all'").assign(
+        network=lambda t: t.station_id.map(d.groupby("station_id").network.first()),
+        nn_km=lambda t: t.station_id.map(dict(zip(ids, nn))))
+    tab = pd.concat(rows + [per], ignore_index=True)
+    tab.to_csv(out / "anchor_buffered.csv", index=False)
+    return tab
+
+
 def _fit_corr_length(res: pd.DataFrame, dist: np.ndarray, ids: list[str]) -> float:
     """Exponential correlation length (km) of daily residuals between stations."""
     piv = res.pivot_table(index="t", columns="station_id", values="r").reindex(columns=ids)
@@ -185,11 +267,7 @@ def run_krige(fb, dcfg, tcfg, out: Path, pairs: Path | None) -> pd.DataFrame:
         df = df.merge(pp[["station_id", "t", *extra]], on=["station_id", "t"], how="left")
         cols += extra
     ids = sorted(df.station_id.unique())
-    ll = df.groupby("station_id")[["lat", "lon"]].first().loc[ids].values
-    R = 6371.0
-    la, lo = np.radians(ll[:, 0]), np.radians(ll[:, 1])
-    dist = R * np.arccos(np.clip(np.sin(la[:, None]) * np.sin(la[None]) + np.cos(la[:, None])
-                                 * np.cos(la[None]) * np.cos(lo[:, None] - lo[None]), -1, 1))
+    dist = _dist_km(df.groupby("station_id")[["lat", "lon"]].first().loc[ids].values)
     tr = df[df.split == "train"].assign(r=lambda g: g.obs - g.NSRDB)
     L = _fit_corr_length(tr, dist, ids)
     print(f"[anchor] residual correlation length {L:.0f} km over {len(ids)} stations")
@@ -385,6 +463,8 @@ if __name__ == "__main__":
     er.add_argument("--fit-net", default=None, help="e.g. uscrn")
     er.add_argument("--score-net", default=None, help="e.g. ok_mesonet")
     er.add_argument("--centred", action="store_true")
+    bu = sub.add_parser("buffered")
+    bu.add_argument("--radii", type=float, nargs="+", default=[0, 50, 100, 200, 400])
     sub.add_parser("networks")
     fo = sub.add_parser("folds")
     fo.add_argument("--model", default="xgb_B_modis")
@@ -413,6 +493,14 @@ if __name__ == "__main__":
     dcfg, tcfg = load_all()
     fb = builder(dcfg, tcfg)
     out = run_dir(dcfg, tcfg, "eval")
+    if a.cmd == "buffered":
+        t = run_buffered(fb, dcfg, tcfg, out, a.radii)
+        print(t[t.station_id == "all"][["network", "model", "n", "rmse", "bias", "skill_crmse_vs_B1",
+                                         "skill_lo90", "skill_hi90"]].round(3).to_string(index=False))
+        p = t[t.station_id != "all"]
+        print(p.pivot(index="station_id", columns="model", values="skill_crmse_vs_B1")
+              .join(p.groupby("station_id").nn_km.first()).round(3).to_string())
+        raise SystemExit
     if a.cmd == "errmodel":
         t = run_errmodel(fb, dcfg, tcfg, out, a.fit_net, a.score_net, a.centred)
     elif a.cmd == "krige":
