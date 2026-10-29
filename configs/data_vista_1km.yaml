@@ -1,0 +1,32 @@
+# 1 km grid (TACC Vista only). The full domain at 1 km is 925 x 1000 cells,
+# ~5.4 GB per variable for the GOES years, more than a node can hold for the
+# feature builder, so 1 km runs on a subdomain: 30-35 N, 100.5-94.5 W. It
+# holds the Austin holdout and 42 stations (all 39 Oklahoma Mesonet, USCRN
+# Austin, Bronte, Palestine) and lies north of Mexico, so NLCD covers it.
+#
+# GOES window only (from data_vista_5km.yaml). The NSRDB points (~4 km), GOES
+# mask (2 km) and optical depth (4 km) are all coarser than the cells, so they
+# are interpolated linearly instead of binned (grid.point_remap). The 1 km
+# target therefore carries no information below ~4 km: finer structure can
+# only come from the inputs (MODIS 1 km, terrain).
+extends: data_vista_5km.yaml
+
+store_root: "/scratch/11755/gurup12/downscaling-radiation/data_store_1km"
+run_group: data_store_1km
+
+domain:
+  name: sc_1km
+  lon_min: -100.5
+  lon_max: -94.5
+  lat_min: 30.0
+  lat_max: 35.0
+
+grid:
+  target_res_m: 1000
+  point_remap: linear
+
+sources:
+  statics:
+    precomputed: "/scratch/11755/gurup12/downscaling-radiation/statics_1km.npz"
+    land_mask_from: null        # NLCD covers the whole subdomain
+    terrain_res_m: 250          # slope, sky-view and horizons from a 250 m DEM

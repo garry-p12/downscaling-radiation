@@ -53,3 +53,28 @@ def test_binning_is_conservative_and_nan_aware(rng):
 def test_coarse_mean():
     fine = np.array([[1.0, 3.0, 5.0, np.nan]])
     assert np.allclose(rg.coarse_mean(fine, np.array([0, 0, 1, 1]), 3)[0, :2], [2.0, 5.0])
+
+
+def test_linear_matrix_exact_on_planes_and_nan_outside(rng):
+    grid = build_target_grid(DOM, {"target_crs": "EPSG:5070", "target_res_m": 1000})
+    xx, yy = grid.meshgrid()
+    # scattered points covering only the western half of the grid
+    px = rng.uniform(xx.min() - 5e3, xx.mean(), 3000)
+    py = rng.uniform(yy.min() - 5e3, yy.max() + 5e3, 3000)
+    W, counts = rg.linear_matrix(px, py, grid)
+    f = lambda x, y: 1e-4 * x - 3e-5 * y + 2  # noqa: E731
+    out = rg.apply(W, f(px, py)[None], out_shape=grid.shape)[0]
+    inside = counts > 0
+    assert inside[:, : grid.shape[1] // 3].all() and not inside[:, -1].any()
+    assert np.allclose(out[inside], f(xx, yy)[inside])
+    assert np.isnan(out[~inside]).all()
+
+
+def test_point_matrix_dispatch(rng):
+    grid = build_target_grid(DOM, GRID)
+    xx, yy = grid.meshgrid()
+    px, py = xx.ravel() + 100, yy.ravel() - 100
+    Wb, cb = rg.point_matrix(px, py, grid, "bin")
+    assert (cb == 1).all()
+    _, cl = rg.point_matrix(px, py, grid, "linear")
+    assert cl.sum() > 0

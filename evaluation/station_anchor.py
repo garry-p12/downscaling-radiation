@@ -345,6 +345,53 @@ def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = 
           f"excluded {exclude})")
 
 
+def transfer_target(dcfg, src_store: str, fold: str, base: str = "nsrdb_ghi",
+                    block: int = 50) -> None:
+    """Anchored target on a finer grid from a coarser store's: this store's
+    NSRDB plus the coarser store's anchoring correction (corrected - NSRDB),
+    bilinear in the shared projected plane.
+
+    The correction is the error model's prediction times the daily norm, a
+    field smooth on the station-network scale, so interpolating it loses
+    nothing; refitting the error models at 1 km would need the 2001-2018
+    station-day history at 1 km. Cells where the coarse correction is
+    missing (edges, water) take the nearest available value."""
+    import xarray as xr
+    from scipy import ndimage
+
+    from data.build_store import append_to_store
+
+    var = f"{base}_corr_{fold}"
+    store = dcfg["dataset"]["out_zarr"]
+    dst, src = xr.open_zarr(store), xr.open_zarr(src_store)
+    src = src.sel(time=dst.time.values)
+    sx, sy = src.x.values, src.y.values
+    res = float(sx[1] - sx[0])
+    Y, X = np.meshgrid(dst.y.values, dst.x.values, indexing="ij")
+    rc = np.stack([(sy[0] - Y) / res, (X - sx[0]) / res])
+    if rc.min() < -1 or rc[0].max() > sy.size or rc[1].max() > sx.size:
+        raise ValueError(f"{store} is not inside {src_store}")
+    T = dst.sizes["time"]
+    out = np.full((T, *Y.shape), np.nan, "float32")
+    for s in range(0, T, block):
+        sl = slice(s, s + block)
+        d = (src[var].isel(time=sl) - src[base].isel(time=sl)).values
+        fine = dst[base].isel(time=sl).values
+        for i in range(d.shape[0]):
+            gap = ~np.isfinite(d[i])
+            if gap.all():
+                continue
+            if gap.any():
+                idx = ndimage.distance_transform_edt(gap, return_distances=False, return_indices=True)
+                d[i] = d[i][tuple(idx)]
+            c = ndimage.map_coordinates(d[i], rc, order=1, mode="nearest")
+            out[s + i] = np.maximum(fine[i] + c, 0)
+        print(f"[anchor] transfer {var} day {s}/{T}", flush=True)
+    append_to_store(xr.Dataset({var: (("time", "y", "x"), out)}).chunk(
+        {"time": dst.chunks["time"][0]}), store)
+    print(f"[anchor] wrote {var} from {src_store}")
+
+
 def _centred_mse(g: pd.DataFrame, col: str) -> float:
     e = g[col] - g.obs
     return float(np.mean((e - e.groupby(g.station_id).transform("mean")) ** 2))
@@ -480,6 +527,9 @@ if __name__ == "__main__":
     fo.add_argument("--group", default="data_store")
     k = sub.add_parser("krige")
     k.add_argument("--pairs", default=None, help="station_pairs.csv with model columns")
+    tr = sub.add_parser("transfer-target", help="anchored target from a coarser store")
+    tr.add_argument("--from", dest="src", required=True, help="coarser store (zarr)")
+    tr.add_argument("--fold", required=True)
     b = sub.add_parser("build-target")
     b.add_argument("--exclude", nargs="+", required=True)
     b.add_argument("--fold", required=True)
@@ -502,6 +552,9 @@ if __name__ == "__main__":
         raise SystemExit
 
     dcfg, tcfg = load_all()
+    if a.cmd == "transfer-target":
+        transfer_target(dcfg, a.src, a.fold)
+        raise SystemExit
     fb = builder(dcfg, tcfg)
     print(f"[anchor] features ready {pd.Timestamp.now():%H:%M:%S}", flush=True)
     out = run_dir(dcfg, tcfg, "eval")

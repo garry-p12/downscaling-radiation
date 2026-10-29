@@ -70,7 +70,7 @@ def _fine_dir(cfg) -> Path:
     return Path(d) if d else _raw_dir(cfg) / "fine"
 
 
-def aggregate_file(path: Path, grid, W=None, chunk: int = 32):
+def aggregate_file(path: Path, grid, W=None, chunk: int = 32, mode: str = "bin"):
     """One AppEEARS netCDF -> (times, fine (T, ny, nx) float32, W)."""
     ds = xr.open_dataset(path, mask_and_scale=False, decode_times=True)
     da = _layer(ds)
@@ -78,7 +78,7 @@ def aggregate_file(path: Path, grid, W=None, chunk: int = 32):
         la, lo = np.meshgrid(da.lat.values, da.lon.values, indexing="ij")
         tf = Transformer.from_crs("EPSG:4326", grid.crs, always_xy=True)
         px, py = tf.transform(lo.ravel(), la.ravel())
-        W, _ = rg.binning_matrix(px, py, grid, pt_weight=np.cos(np.deg2rad(la.ravel())))
+        W, _ = rg.point_matrix(px, py, grid, mode, pt_weight=np.cos(np.deg2rad(la.ravel())))
     T = da.sizes["time"]
     out = np.full((T, *grid.shape), np.nan, dtype="float32")
     for s in range(0, T, chunk):
@@ -98,13 +98,15 @@ def aggregate(cfg) -> None:
     fine.mkdir(parents=True, exist_ok=True)
     grid = build_target_grid(cfg["domain"], cfg["grid"])
     W = None
+    mode = cfg["grid"].get("point_remap", "bin")
+    y0, y1 = int(cfg["time"]["train"][0][:4]), int(cfg["time"]["test"][1][:4])
     for d in sorted(p for p in raw.iterdir() if p.is_dir() and (p / "DONE").exists()):
         dest = fine / f"modis_cf_{d.name}.nc"
-        if dest.exists():
+        if dest.exists() or not y0 <= int(d.name.rsplit("_", 1)[-1]) <= y1:
             continue
         parts = []
         for f in sorted(d.glob("*.nc")):
-            times, arr, W = aggregate_file(f, grid, W)
+            times, arr, W = aggregate_file(f, grid, W, mode=mode)
             parts.append(xr.DataArray(arr, dims=("time", "y", "x"),
                                       coords=dict(time=times, y=grid.y, x=grid.x)))
         if not parts:

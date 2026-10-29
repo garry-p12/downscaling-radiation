@@ -9,6 +9,10 @@ weights are computed exactly once per (source grid, fine grid) pair.
   enclosing_index   fine cell -> the coarse cell that contains it
   binning_matrix    scattered fine-scale points (NSRDB ~4 km) -> fine cells,
                     area-weighted MEAN (conservative), never bilinear
+  linear_matrix     scattered points -> cell centres, linear on a Delaunay
+                    triangulation: for grids FINER than the points (1 km vs
+                    NSRDB 4 km / GOES 2-4 km), where binning leaves most cells empty
+  point_matrix      binning or linear by name (config grid.point_remap)
   coarse_mean       fine -> coarse block means through enclosing_index
 """
 from __future__ import annotations
@@ -100,6 +104,45 @@ def binning_matrix(pt_x, pt_y, grid, pt_weight=None, min_count: int = 1):
     rs = np.asarray(W.sum(1)).ravel()
     W = sp.diags(np.where(rs > 0, 1.0 / np.where(rs > 0, rs, 1), 0.0)) @ W
     return W.tocsr(), counts.reshape(ny, nx)
+
+
+def linear_matrix(pt_x, pt_y, grid):
+    """Barycentric (linear) interpolation of scattered points at cell centres.
+
+    Returns (W (n_fine, n_pts), counts (ny, nx)); counts is the number of
+    contributing points (3 inside the points' hull, 0 outside -> NaN rows).
+    Points outside the grid's padded extent are dropped before triangulating.
+    """
+    from scipy.spatial import Delaunay
+
+    ny, nx = grid.shape
+    px, py = np.asarray(pt_x, float), np.asarray(pt_y, float)
+    pad = 10 * grid.res_m + 20e3
+    near = np.nonzero((px > grid.x.min() - pad) & (px < grid.x.max() + pad)
+                      & (py > grid.y.min() - pad) & (py < grid.y.max() + pad))[0]
+    tri = Delaunay(np.c_[px[near], py[near]])
+    xx, yy = grid.meshgrid()
+    q = np.c_[xx.ravel(), yy.ravel()]
+    simp = tri.find_simplex(q)
+    inside = np.nonzero(simp >= 0)[0]
+    T = tri.transform[simp[inside]]                     # (n, 3, 2)
+    b = np.einsum("nij,nj->ni", T[:, :2], q[inside] - T[:, 2])
+    bary = np.c_[b, 1 - b.sum(1)]
+    cols = near[tri.simplices[simp[inside]]]            # (n, 3) -> original point index
+    W = sp.csr_matrix((bary.ravel(), (np.repeat(inside, 3), cols.ravel())),
+                      shape=(ny * nx, px.size))
+    counts = np.zeros(ny * nx, int)
+    counts[inside] = 3
+    return W, counts.reshape(ny, nx)
+
+
+def point_matrix(pt_x, pt_y, grid, mode: str = "bin", pt_weight=None, min_count: int = 1):
+    """``mode`` 'bin' -> binning_matrix, 'linear' -> linear_matrix."""
+    if mode == "linear":
+        return linear_matrix(pt_x, pt_y, grid)
+    if mode != "bin":
+        raise ValueError(f"point_remap {mode!r}: use 'bin' or 'linear'")
+    return binning_matrix(pt_x, pt_y, grid, pt_weight=pt_weight, min_count=min_count)
 
 
 def apply(W: sp.spmatrix, src: np.ndarray, out_shape=None) -> np.ndarray:

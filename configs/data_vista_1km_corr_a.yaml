@@ -1,0 +1,7 @@
+# 1 km, GOES window, trained on the v1 anchored target, fold a. The target is
+# NSRDB at 1 km plus the 5 km anchoring correction, interpolated
+# (evaluation/station_anchor.py transfer-target).
+extends: data_vista_1km.yaml
+
+run_group: data_store_1km_corr_a
+target_var: nsrdb_ghi_corr_a

@@ -39,25 +39,30 @@ from common.splits import assign_splits, holdout_masks
 
 
 def nsrdb_to_grid(da: xr.DataArray, grid, cache_dir: str | None,
-                  min_points: int = 1):
-    """(time, point) NSRDB daily totals -> (time, y, x), plus point counts."""
+                  min_points: int = 1, mode: str = "bin"):
+    """(time, point) NSRDB daily totals -> (time, y, x), plus point counts.
+
+    ``mode`` (config grid.point_remap): 'bin' averages the points in each cell
+    (10 and 5 km); 'linear' interpolates them (1 km, finer than the 4 km points)."""
     lat, lon = da["lat"].values, da["lon"].values
     tf = Transformer.from_crs("EPSG:4326", grid.crs, always_xy=True)
     px, py = tf.transform(lon, lat)
     key = rg.grid_key(lat, lon, grid.x, grid.y, [min_points])
 
     def build():
-        W, _ = rg.binning_matrix(px, py, grid, pt_weight=np.cos(np.deg2rad(lat)),
-                                 min_count=min_points)
+        W, _ = rg.point_matrix(px, py, grid, mode, pt_weight=np.cos(np.deg2rad(lat)),
+                               min_count=min_points)
         return W
 
-    W = rg.cached(Path(cache_dir) / f"nsrdb_bin_{key}.npz", build) if cache_dir \
+    tag = "bin" if mode == "bin" else f"bin_{mode}"
+    W = rg.cached(Path(cache_dir) / f"nsrdb_{tag}_{key}.npz", build) if cache_dir \
         else build()
-    _, counts = rg.binning_matrix(px, py, grid)
+    _, counts = rg.point_matrix(px, py, grid, mode)
     # In blocks of days: the whole float64 stack does not fit a login node at 5 km.
     out = np.empty((da.sizes["time"], *grid.shape), "float32")
-    for s in range(0, da.sizes["time"], 500):
-        blk = da.isel(time=slice(s, s + 500)).values
+    step = int(np.clip(5e7 // np.prod(grid.shape), 1, 500))
+    for s in range(0, da.sizes["time"], step):
+        blk = da.isel(time=slice(s, s + step)).values
         out[s:s + len(blk)] = rg.apply(W, blk, out_shape=grid.shape)
     return out, counts
 
@@ -173,8 +178,11 @@ def main() -> None:
 
     power = open_power(cfg)
     nsrdb = open_nsrdb(cfg, "ghi")
+    # only the configured window (assemble keeps no more): at 1 km every day is ~1.4 GB
+    nsrdb = nsrdb.sel(time=slice(cfg["time"]["train"][0], cfg["time"]["test"][1]))
     target, counts = nsrdb_to_grid(nsrdb, grid, cfg["dataset"].get("cache_dir"),
-                                   int(cfg["dataset"].get("min_nsrdb_points", 1)))
+                                   int(cfg["dataset"].get("min_nsrdb_points", 1)),
+                                   cfg["grid"].get("point_remap", "bin"))
     statics = build_statics(cfg, grid)
     pre = cfg["sources"]["statics"].get("precomputed")
     if pre and Path(pre).exists() and "shade_beam" in np.load(pre).files:

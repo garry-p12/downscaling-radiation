@@ -111,8 +111,8 @@ def day_keys(fs, day: pd.Timestamp) -> list[str]:
 class Mapper:
     """Fixed-grid (x, y) -> 10 km binning, cached per fixed-grid definition."""
 
-    def __init__(self, grid):
-        self.grid = grid
+    def __init__(self, grid, mode: str = "bin"):
+        self.grid, self.mode = grid, mode       # mode: config grid.point_remap
         self.cache: dict = {}
 
     def get(self, ds: xr.Dataset):
@@ -132,7 +132,7 @@ class Mapper:
             tf = Transformer.from_crs("EPSG:4326", g.crs, always_xy=True)
             px, py = tf.transform(np.where(ok, lon, 0), np.where(ok, lat, 0))
             px = np.where(ok, px, -1e12)                 # off-disk: outside the grid
-            W, _ = rg.binning_matrix(px.ravel(), py.ravel(), g)
+            W, _ = rg.point_matrix(px.ravel(), py.ravel(), g, self.mode)
             rows = np.nonzero(np.asarray(W.getnnz(axis=0)) > 0)[0]   # used source px
             self.cache[key] = (W[:, rows], rows)
         return self.cache[key]
@@ -155,7 +155,7 @@ def process_day(args) -> str:
     grid = build_target_grid(cfg["domain"], cfg["grid"])
     lat, lon = grid.latlon()
     if _MAPPER is None:
-        _MAPPER = Mapper(grid)
+        _MAPPER = Mapper(grid, cfg["grid"].get("point_remap", "bin"))
     mapper = _MAPPER
     shape = grid.shape
     acc = {k: np.zeros(shape) for k in ("all", "am", "pm")}
