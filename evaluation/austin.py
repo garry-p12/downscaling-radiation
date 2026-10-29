@@ -359,13 +359,13 @@ def fig_10v5(out: Path) -> None:
     use_res(5); z5, w5, _ = _load()
     k = pick_days(z10)[0]
     d5 = int(np.nonzero(z5["days"] == z10["days"][k])[0][0])
-    cols = [("NSRDB", "NSRDB (product)"), ("swin_nsrdb", LAB["swin_nsrdb"]),
-            ("swin_v1", LAB["swin_v1"]), ("swin_v2", LAB["swin_v2"])]
+    cols = [("NSRDB", "NSRDB"), ("swin_nsrdb", "Swin, NSRDB tgt"),
+            ("swin_v1", "Swin, anch. v1"), ("swin_v2", "Swin, anch. v2")]
     v = np.concatenate([z10[c][k][w10.valid] for c, _ in cols])
     lo, hi = np.nanpercentile(v, 1), np.nanpercentile(v, 99)
-    fig = plt.figure(figsize=(7.4, 4.3))
-    gs = fig.add_gridspec(2, len(cols) + 2, width_ratios=[1] * len(cols) + [0.05, 1.35],
-                          wspace=0.05, hspace=0.08)
+    fig = plt.figure(figsize=(7.4, 3.4))
+    gs = fig.add_gridspec(2, len(cols) + 3, width_ratios=[1] * len(cols) + [0.06, 1.25, 1.5],
+                          wspace=0.06, hspace=0.08)
     obs10, obs5 = _station_obs(z10["days"]).values, _station_obs(z5["days"]).values
     for i, (z, w, d, res) in enumerate(((z10, w10, k, 10), (z5, w5, d5, 5))):
         for j, (c, t) in enumerate(cols):
@@ -375,10 +375,12 @@ def fig_10v5(out: Path) -> None:
                 ax.set_title(t, fontsize=6.6, loc="left")
             if j == 0:
                 ax.set_ylabel(f"{res} km", fontsize=8)
-        cb = fig.colorbar(im, cax=fig.add_subplot(gs[i, len(cols)]))
-        cb.ax.tick_params(labelsize=5.5, length=1.5); cb.outline.set_linewidth(0.3)
-        cb.set_label(f"GHI ({UNITS})", fontsize=6)
+    cb = fig.colorbar(im, cax=fig.add_subplot(gs[:, len(cols)]))
+    cb.ax.tick_params(labelsize=5.5, length=1.5); cb.outline.set_linewidth(0.3)
+    cb.set_label(f"GHI ({UNITS})", fontsize=6)
     # station RMSE at both resolutions
+    from matplotlib.patches import Patch
+
     ax = fig.add_subplot(gs[:, -1])
     keys = ["B1", "NSRDB", "swin_nsrdb", "swin_v2", "swin_v1"]
     names = {"B1": "B1", "NSRDB": "NSRDB", "swin_nsrdb": "Swin, NSRDB tgt",
@@ -390,11 +392,11 @@ def fig_10v5(out: Path) -> None:
             ax.barh(y + off, r, height=0.34, color=col)
             ax.text(r + 0.01, y + off, f"{r:.2f} ({100 * s:+.0f}%)", va="center", fontsize=5.4, color=C_INK)
     ax.set_yticks(range(len(keys)), [names[x] for x in keys]); ax.invert_yaxis()
-    ax.set_xlim(0, 0.95); ax.set_xlabel(f"RMSE at Austin 33 NW ({UNITS})")
-    ax.barh([], [], color=C_BASE, label="10 km"); ax.barh([], [], color=C_AQUA, label="5 km")
-    ax.legend(loc="lower right", fontsize=5.8)
-    ax.yaxis.tick_right(); ax.tick_params(axis="y", length=0); ax.grid(axis="x"); ax.set_axisbelow(True)
-    fig.text(0.0, 0.0, f"{pd.Timestamp(z10['days'][k]):%-d %b %Y} (spring case day of a1), one colour scale. "
+    ax.set_xlim(0, 1.1); ax.set_xlabel(f"RMSE at Austin 33 NW\n({UNITS})")
+    ax.legend(handles=[Patch(color=C_BASE, label="10 km"), Patch(color=C_AQUA, label="5 km")],
+              loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=5.8)
+    ax.tick_params(axis="y", length=0); ax.grid(axis="x"); ax.set_axisbelow(True)
+    fig.text(0.0, -0.06, f"{pd.Timestamp(z10['days'][k]):%-d %b %Y} (spring case day of a1), one colour scale. "
              "Right: 2020–21 daily RMSE at the station pixel, skill vs B1 at the same resolution in brackets.",
              fontsize=6.2, color=C_MUTED)
     save(fig, out, "a4_austin_10v5")
