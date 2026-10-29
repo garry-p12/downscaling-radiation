@@ -311,12 +311,13 @@ def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = 
 
     df = station_table(fb, dcfg)
     names = fb.track("B")
-    keep = (~df.station_id.isin(exclude) & (df.split == "train")).values
+    keep = (~df.station_id.isin(exclude) & (df.split == "train")).to_numpy(copy=True)
     if fit_net:
         keep &= (df.network == fit_net).values
     X = features(fb, df[keep], names)
     y = err_target(df, centred)[keep]
     bst = fit_err_model(X, y)
+    print(f"[anchor] error model fit on {len(y)} station-days {pd.Timestamp.now():%H:%M:%S}", flush=True)
     T = len(fb.times)
     corr = np.full_like(fb.ghi, np.nan)
     vp = np.nonzero(fb.valid.ravel())[0]
@@ -332,8 +333,8 @@ def build_target(fb, dcfg, tcfg, exclude: list[str], fold: str, centred: bool = 
         flat = corr[t].ravel()
         flat[dd.pix.values] = np.maximum(dd.target.values + dh * dd.norm.values, 0)
         corr[t] = flat.reshape(fb.ny, fb.nx)
-        if t % 1000 == 0:
-            print(f"[anchor] corrected target day {t}/{T}", flush=True)
+        if t % 100 == 0:
+            print(f"[anchor] corrected target day {t}/{T} {pd.Timestamp.now():%H:%M:%S}", flush=True)
     var = f"{fb.target_var}_corr_{fold}"
     store = dcfg["dataset"]["out_zarr"]
     st = xr.open_zarr(store)
@@ -502,6 +503,7 @@ if __name__ == "__main__":
 
     dcfg, tcfg = load_all()
     fb = builder(dcfg, tcfg)
+    print(f"[anchor] features ready {pd.Timestamp.now():%H:%M:%S}", flush=True)
     out = run_dir(dcfg, tcfg, "eval")
     if a.cmd == "buffered":
         t = run_buffered(fb, dcfg, tcfg, out, a.radii)

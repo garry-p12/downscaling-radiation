@@ -57,4 +57,6 @@ case "$1" in
     $PY -u -m evaluation.evaluate ;;
   *) echo "unknown stage $1"; exit 2 ;;
 esac
-echo "=== exit $? $(date)"
+rc=$?
+echo "=== exit $rc $(date)"
+exit $rc

@@ -36,7 +36,7 @@ while true; do
     IFS='|' read -r name args marker limit maxn <<< "$t"
     [ -f "$marker" ] && continue
     n=${tries[$name]:-0}
-    if [ "$n" -ge "$maxn" ]; then continue; fi
+    if [ "$n" -ge "$maxn" ]; then queued "$name" && pending=1; continue; fi
     pending=1
     queued "$name" && continue
     tries[$name]=$((n + 1))
@@ -53,6 +53,7 @@ for t in "${TASKS[@]}"; do
   IFS='|' read -r name _ marker _ _ <<< "$t"
   [ -f "$marker" ] && echo "done: $name" || echo "!!! gave up: $name"
 done
+[ -n "${NO_EVAL:-}" ] && exit 0
 e=$(sb_ $ACC -p "$PART" -t 01:00:00 -J rad_eval slurm/stage.sh eval)
 echo "$(date +%H:%M:%S) submit eval -> $e"
 while queued eval; do sleep 60; done
