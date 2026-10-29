@@ -208,32 +208,37 @@ def assemble(cfg) -> None:
     by_year: dict[str, list] = {}
     for f in files:
         by_year.setdefault(f.stem[:4], []).append(f)
+    pre = PRODUCTS[PRODUCT][3]
     for y, fs_ in sorted(by_year.items()):
         t = pd.to_datetime([f.stem for f in fs_], format="%Y%m%d")
-        arrs = {k: np.stack([np.load(f)[k] for f in fs_]) for k in ("cf", "am", "pm")}
-        pre = PRODUCTS[PRODUCT][3]
-        ds = xr.Dataset({pre if k == "cf" else f"{pre}_{k}": (("time", "y", "x"), v)
-                         for k, v in arrs.items()},
-                        coords=dict(time=t, y=grid.y, x=grid.x))
-        ds.to_netcdf(root / f"{pre}_{y}.nc")
-        print(f"[goes] {y}: {len(t)} days, NaN {100 * float(np.isnan(arrs['cf']).mean()):.1f}%")
+        # one variable at a time: a year of three 1 km stacks does not fit a login node
+        for i, k in enumerate(("cf", "am", "pm")):
+            v = np.stack([np.load(f)[k] for f in fs_])
+            if k == "cf":
+                nan = 100 * float(np.isnan(v).mean())
+            xr.Dataset({pre if k == "cf" else f"{pre}_{k}": (("time", "y", "x"), v)},
+                       coords=dict(time=t, y=grid.y, x=grid.x)).to_netcdf(
+                root / f"{pre}_{y}.nc", mode="w" if i == 0 else "a")
+            del v
+        print(f"[goes] {y}: {len(t)} days, NaN {nan:.1f}%", flush=True)
 
 
 def add_to_store(cfg) -> None:
     store = cfg["dataset"]["out_zarr"]
     st = xr.open_zarr(store)
+    c = st.chunks["time"][0]
     files = sorted(_root(cfg).glob(f"{PRODUCTS[PRODUCT][3]}_*.nc"))
-    g = xr.concat([xr.open_dataset(f) for f in files], "time").sortby("time")
+    g = xr.open_mfdataset(files, chunks={"time": c}).sortby("time")
     g = g.reindex(time=st.time.values)
     from data.build_store import append_to_store
 
-    # One variable at a time: three full-period 5 km stacks do not fit a login node.
+    # One variable at a time, lazily (dask, one time chunk in memory): full-period
+    # stacks do not fit a login node at 5 km, nor a single one at 1 km.
     for k in g.data_vars:
-        v = g[k].values.astype("float32")
-        append_to_store(xr.Dataset({f"dyn_{k}": (("time", "y", "x"), v)}).chunk(
-            {"time": st.chunks["time"][0]}), store)
-        print(f"[goes] dyn_{k}: NaN {100 * float(np.isnan(v).mean()):.1f}%", flush=True)
-        del v
+        v = g[k].astype("float32").chunk({"time": c})
+        append_to_store(xr.Dataset({f"dyn_{k}": v}), store)
+        nan = float(xr.open_zarr(store)[f"dyn_{k}"].isnull().mean().compute())
+        print(f"[goes] dyn_{k}: NaN {100 * nan:.1f}%", flush=True)
 
 
 if __name__ == "__main__":
