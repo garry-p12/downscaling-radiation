@@ -1,6 +1,11 @@
 """Austin-area inference maps: the spatial holdout up close.
 
     python -m evaluation.austin                  # cache (GOES config) + figures
+    python -m evaluation.austin --res 5          # 5 km: cache built on Vista (below)
+
+    # on Vista, then copy runs/figures/austin_cache_5km.npz back:
+    DOWNSCALE_CONFIG_data=configs/data_vista_5km.yaml \
+        python -m evaluation.austin --res 5 --cache runs/figures/austin_cache_5km.npz
 
 Austin and its 1 deg buffer are never trained on, and the Austin 33 NW USCRN
 station sits in anchoring fold a, so the fold-a models are the ones whose
@@ -16,6 +21,11 @@ Figures (runs/figures/):
                       (largest NSRDB spread over the window in that season)
   a2_austin_maps      test-period mean GHI, anchoring shift and RMSE maps
   a3_austin_station   Austin 33 NW: daily series, scatter and scores
+  a4_austin_10v5      one case day and the station scores at 10 km and 5 km
+                      (needs both caches)
+
+The 5 km figures carry a _5km suffix. The cache also stores the grid geometry
+and the station pixel, so figures need no local store.
 """
 from __future__ import annotations
 
@@ -46,6 +56,8 @@ from evaluation.figures import (
 )
 
 CACHE = RUNS / "figures" / "austin_cache.npz"
+RES_KM = 10
+TAG = ""
 BOX = (28.4, 32.5, -100.3, -95.3)          # lat_min, lat_max, lon_min, lon_max of the window
 CITIES = {"Austin": (30.27, -97.74), "San Antonio": (29.42, -98.49), "Waco": (31.55, -97.15)}
 STATION = "TX_Austin_33_NW"
@@ -54,9 +66,19 @@ MODELS = {  # cache key: (run group, run name)
     "swin_v1": ("data_store_goes_corr_a", "swin_B_cod"),
     "swin_v2": ("data_store_goes_corr2_a", "swin_B_cod"),
 }
+MODELS_10KM = dict(MODELS)
+MODELS_5KM = {k: (g.replace("data_store_goes", "data_store_5km"), n) for k, (g, n) in MODELS.items()}
 LAB = {"POWER": "POWER 1° (input)", "B1": "B1 bilinear", "NSRDB": "NSRDB",
        "swin_nsrdb": "Swin, NSRDB target", "swin_v1": "Swin, anchored v1",
        "swin_v2": "Swin, anchored v2", "anch_v1": "Anchored target v1"}
+
+
+def use_res(res: int) -> None:
+    """Switch the module to the 10 km or 5 km grid."""
+    global CACHE, RES_KM, TAG, MODELS
+    RES_KM, TAG = res, ("" if res == 10 else f"_{res}km")
+    CACHE = RUNS / "figures" / f"austin_cache{TAG}.npz"
+    MODELS = MODELS_5KM if res == 5 else MODELS_10KM
 
 
 def build_cache(path: Path) -> None:
@@ -94,7 +116,11 @@ def build_cache(path: Path) -> None:
     out["anch_v1"] = ds["nsrdb_ghi_corr_a"].isel(time=days).values[crop]
     out["anch_v2"] = ds["nsrdb_ghi_corr_2a"].isel(time=days).values[crop]
     out["developed"] = fb.static["lc_developed"][r0:r1, c0:c1]
-    np.savez_compressed(path, days=fb.times[days], rc=np.array([r0, r1, c0, c1]),
+    meta = pd.read_csv(Path(dcfg["sources"]["stations"]["out_dir"]) / "stations.csv")
+    s = meta.set_index("station_id").loc[STATION]
+    geo = {"fx": ds.x.values, "fy": ds.y.values, "st_rc": np.array([int(s.row), int(s.col)])}
+    geo.update({f"f_{k}": ds[k].values.astype(bool) for k in ("valid", "holdout", "exclusion")})
+    np.savez_compressed(path, days=fb.times[days], rc=np.array([r0, r1, c0, c1]), **geo,
                         **{k: v.astype("float32") for k, v in out.items()})
     print(f"[austin] wrote {path}")
 
@@ -136,12 +162,26 @@ class Window:
         return im
 
 
-def _load(frame):
-    z = dict(np.load(CACHE, allow_pickle=True))
+def _frame(z):
+    """MapFrame from the geometry saved in the cache (or the local 10 km store)."""
+    if "fx" not in z:
+        from data.build_store import open_store
+        from training.common import load_all
+
+        return MapFrame(open_store(load_all()[0]))
+    import xarray as xr
+
+    return MapFrame(xr.Dataset({k: (("y", "x"), z[f"f_{k}"]) for k in ("valid", "holdout", "exclusion")},
+                               coords={"x": z["fx"], "y": z["fy"]}))
+
+
+def _load(cache=None):
+    z = dict(np.load(cache or CACHE, allow_pickle=True))
     meta = pd.read_csv(Path("data_store/raw/stations/stations.csv")).set_index("station_id")
     s = meta.loc[STATION]
-    w = Window(frame, z["rc"], (s.lat, s.lon))
-    w.st_rc = (int(s.row) - int(z["rc"][0]), int(s.col) - int(z["rc"][2]))
+    w = Window(_frame(z), z["rc"], (s.lat, s.lon))
+    row, col = z.get("st_rc", (s.row, s.col))
+    w.st_rc = (int(row) - int(z["rc"][0]), int(col) - int(z["rc"][2]))
     return z, w, s
 
 
@@ -200,7 +240,7 @@ def fig_cases(z, w, out: Path) -> None:
              "each field at the station pixel; obs = station daily total. Left column: white = clear, "
              "dark = optically thick cloud. The anchored model's target was built without this station.",
              fontsize=6.2, color=C_MUTED, wrap=True)
-    save(fig, out, "a1_austin_cases")
+    save(fig, out, f"a1_austin_cases{TAG}")
 
 
 def _rmse_map(a, b):
@@ -252,7 +292,7 @@ def fig_maps(z, w, out: Path) -> None:
     fig.text(0.0, 0.04, "Test years 2020–21. (d) The station-anchored target lowers NSRDB over the whole "
              "area. (f) Green contour: pixels over 50% developed land; with optical depth as input, "
              "their error is no larger than their surroundings'.", fontsize=6.2, color=C_MUTED)
-    save(fig, out, "a2_austin_maps")
+    save(fig, out, f"a2_austin_maps{TAG}")
 
 
 def _scores(obs, pred, b1):
@@ -307,33 +347,85 @@ def fig_station(z, w, out: Path) -> None:
     ax.tick_params(axis="y", length=0); ax.grid(axis="x"); ax.set_axisbelow(True)
     panel(ax, "d", x=-0.45)
     fig.text(0.0, -0.02, f"USCRN Austin 33 NW (inside the holdout), test years 2020–21, {n} days. "
-             "Model values at the station's 10 km pixel. Anchored targets were built without this "
+             f"Model values at the station's {RES_KM} km pixel. "
+             "Anchored targets were built without this "
              "station (fold a).", fontsize=6.2, color=C_MUTED)
-    save(fig, out, "a3_austin_station")
+    save(fig, out, f"a3_austin_station{TAG}")
 
 
-def main() -> None:
+def fig_10v5(out: Path) -> None:
+    """Same spring case day at both resolutions, plus the station scores."""
+    use_res(10); z10, w10, _ = _load()
+    use_res(5); z5, w5, _ = _load()
+    k = pick_days(z10)[0]
+    d5 = int(np.nonzero(z5["days"] == z10["days"][k])[0][0])
+    cols = [("NSRDB", "NSRDB (product)"), ("swin_nsrdb", LAB["swin_nsrdb"]),
+            ("swin_v1", LAB["swin_v1"]), ("swin_v2", LAB["swin_v2"])]
+    v = np.concatenate([z10[c][k][w10.valid] for c, _ in cols])
+    lo, hi = np.nanpercentile(v, 1), np.nanpercentile(v, 99)
+    fig = plt.figure(figsize=(7.4, 4.3))
+    gs = fig.add_gridspec(2, len(cols) + 2, width_ratios=[1] * len(cols) + [0.05, 1.35],
+                          wspace=0.05, hspace=0.08)
+    obs10, obs5 = _station_obs(z10["days"]).values, _station_obs(z5["days"]).values
+    for i, (z, w, d, res) in enumerate(((z10, w10, k, 10), (z5, w5, d5, 5))):
+        for j, (c, t) in enumerate(cols):
+            ax = fig.add_subplot(gs[i, j])
+            im = w.show(ax, z[c][d], cities=(i == 0 and j == 0), cmap="cividis", vmin=lo, vmax=hi)
+            if i == 0:
+                ax.set_title(t, fontsize=6.6, loc="left")
+            if j == 0:
+                ax.set_ylabel(f"{res} km", fontsize=8)
+        cb = fig.colorbar(im, cax=fig.add_subplot(gs[i, len(cols)]))
+        cb.ax.tick_params(labelsize=5.5, length=1.5); cb.outline.set_linewidth(0.3)
+        cb.set_label(f"GHI ({UNITS})", fontsize=6)
+    # station RMSE at both resolutions
+    ax = fig.add_subplot(gs[:, -1])
+    keys = ["B1", "NSRDB", "swin_nsrdb", "swin_v2", "swin_v1"]
+    names = {"B1": "B1", "NSRDB": "NSRDB", "swin_nsrdb": "Swin, NSRDB tgt",
+             "swin_v2": "Swin, anch. v2", "swin_v1": "Swin, anch. v1"}
+    for y, kk in enumerate(keys):
+        for off, (z, w, obs, col) in ((-0.18, (z10, w10, obs10, C_BASE)), (0.18, (z5, w5, obs5, C_AQUA))):
+            sr, sc = w.st_rc
+            r, _, s, _ = _scores(obs, z[kk][:, sr, sc], z["B1"][:, sr, sc])
+            ax.barh(y + off, r, height=0.34, color=col)
+            ax.text(r + 0.01, y + off, f"{r:.2f} ({100 * s:+.0f}%)", va="center", fontsize=5.4, color=C_INK)
+    ax.set_yticks(range(len(keys)), [names[x] for x in keys]); ax.invert_yaxis()
+    ax.set_xlim(0, 0.95); ax.set_xlabel(f"RMSE at Austin 33 NW ({UNITS})")
+    ax.barh([], [], color=C_BASE, label="10 km"); ax.barh([], [], color=C_AQUA, label="5 km")
+    ax.legend(loc="lower right", fontsize=5.8)
+    ax.yaxis.tick_right(); ax.tick_params(axis="y", length=0); ax.grid(axis="x"); ax.set_axisbelow(True)
+    fig.text(0.0, 0.0, f"{pd.Timestamp(z10['days'][k]):%-d %b %Y} (spring case day of a1), one colour scale. "
+             "Right: 2020–21 daily RMSE at the station pixel, skill vs B1 at the same resolution in brackets.",
+             fontsize=6.2, color=C_MUTED)
+    save(fig, out, "a4_austin_10v5")
+
+
+def main(res: int = 10) -> None:
+    use_res(res)
     if not CACHE.exists():
+        if res != 10:
+            raise SystemExit(f"{CACHE} missing: build it on Vista (see module docstring)")
         env = dict(os.environ, DOWNSCALE_CONFIG_data="configs/data_goes.yaml")
         subprocess.run([sys.executable, "-m", "evaluation.austin", "--cache", str(CACHE)],
                        env=env, check=True)
-    from data.build_store import open_store
-    from training.common import load_all
-
     style()
     out = RUNS / "figures"
-    frame = MapFrame(open_store(load_all()[0]))
-    z, w, _ = _load(frame)
+    z, w, _ = _load()
     fig_cases(z, w, out)
     fig_maps(z, w, out)
     fig_station(z, w, out)
+    caches = [RUNS / "figures" / f"austin_cache{t}.npz" for t in ("", "_5km")]
+    if all(c.exists() for c in caches):
+        fig_10v5(out)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--res", type=int, default=10, choices=(10, 5))
     ap.add_argument("--cache", default=None, help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.cache:
+        use_res(a.res)
         build_cache(Path(a.cache))
     else:
-        main()
+        main(a.res)

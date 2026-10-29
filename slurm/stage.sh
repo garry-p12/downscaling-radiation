@@ -20,6 +20,9 @@ if [ "${1:-}" = "with-train" ]; then
 fi
 echo "=== $(hostname) stage=$* train=${DOWNSCALE_CONFIG_train:-default} $(date)"
 case "$1" in
+  py)
+    # any module:  stage.sh py -m evaluation.austin --res 5 --cache ...
+    shift; $PY -u "$@" ;;
   build)
     $PY -u -m data.build_store && $PY -u -m data.check_discontinuity
     $PY -u -m data.stations build || echo "!!! stations build failed (no station data?)"
