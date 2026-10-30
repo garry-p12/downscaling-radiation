@@ -1,8 +1,14 @@
 # 1 km grid: 128-cell crops (128 km). The 320 km context of the 10 and 5 km
 # runs would be 320 x 320 cells here, too large per sample; this keeps the
-# token count of a 5 km crop x 4. Everything else as train.yaml.
+# token count of a 5 km crop x 4. Everything else as train.yaml, except:
 extends: train.yaml
 
 swin:
   crop: 128
   batch_size: 8
+  # No SSIM term at 1 km. The 11-cell window is 11 km here, over which the
+  # target (4 km NSRDB, linearly remapped) has almost no structure, while the
+  # constants scale with the 128 km crop's range: 1 - SSIM stayed ~0.85 and
+  # swamped the MSE (~0.001). With it the model drew sub-30 km texture at 5.6x
+  # the target amplitude (dev RMSE 0.53 vs 0.21 without, 2026-10-29).
+  ssim_weight: 0.0

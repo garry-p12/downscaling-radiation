@@ -1,7 +1,7 @@
 """Grid resolution: the same models at 10, 5 (and 1) km, scored at the stations.
 
     python -m evaluation.resolution                 # 10 vs 5 km
-    python -m evaluation.resolution --res 10 5 1    # adds the 1 km subdomain
+    python -m evaluation.resolution --res 5 10 1    # adds the 1 km subdomain; gains vs 5 km
 
 Every grid is scored on the station-days ALL requested grids have (the 1 km
 grid covers a subdomain, so adding it restricts the comparison to its 42
@@ -9,8 +9,11 @@ stations). Anchored models are scored at each station by the fold whose
 correction never saw it, as in station_anchor.score_networks. Skill is centred
 (station mean error removed) relative to B1 on the SAME grid; the paired gain
 resamples the same weeks for both grids, so it is the resolution effect alone.
+Gains are against the first grid listed.
 
-Writes runs/figures/resolution.csv, resolution_gain.csv and fig13_resolution.
+Writes runs/figures/resolution.csv, resolution_gain.csv and fig13_resolution,
+each with the grids as a suffix when they are not the default 10 vs 5 km
+(e.g. resolution_10_5_1.csv, fig13_resolution_10_5_1).
 """
 from __future__ import annotations
 
@@ -112,7 +115,7 @@ def compare(res: list[int], boot: int = 500) -> tuple[pd.DataFrame, pd.DataFrame
     return pd.DataFrame(rows), pd.DataFrame(gains)
 
 
-def fig_resolution(t: pd.DataFrame, gains: pd.DataFrame, out) -> None:
+def fig_resolution(t: pd.DataFrame, gains: pd.DataFrame, out, name: str = "fig13_resolution") -> None:
     res = sorted(t.res_km.unique(), reverse=True)
     a = t[(t.network == "all") & t.model.isin(MODELS)].set_index(["model", "res_km"])
     n_st, n = int(a.stations.iloc[0]), int(a.n.iloc[0])
@@ -143,9 +146,16 @@ def fig_resolution(t: pd.DataFrame, gains: pd.DataFrame, out) -> None:
             fam = C_SWIN if m.startswith("Swin") else C_XGB if m.startswith("XGB") else C_MUTED
             b.plot(100 * gg.loc[m, ["lo90", "hi90"]].values, [y + off] * 2, color=fam, lw=1.5,
                    solid_capstyle="round", alpha=0.85)
-            b.scatter(100 * gg.loc[m, "gain"], y + off, s=24, color=fam if r == 5 else "white",
-                      edgecolor=fam, linewidth=0.9, zorder=3)
+            b.scatter(100 * gg.loc[m, "gain"], y + off, s=24,
+                      color=fam if r < gg.vs_km.iloc[0] else "white", edgecolor=fam, linewidth=0.9,
+                      zorder=3)
     b.axvline(0, color=C_INK, lw=0.8)
+    if g.res_km.nunique() > 1:
+        vs = int(g.vs_km.iloc[0])
+        for r in sorted(g.res_km.unique()):
+            b.scatter([], [], s=24, color=C_MUTED if r < vs else "white", edgecolor=C_MUTED,
+                      linewidth=0.9, label=f"{r} vs {vs} km")
+        b.legend(loc="lower right", fontsize=6.5, handletextpad=0.1)
     b.set_xlabel(f"Skill gain vs {int(g.vs_km.iloc[0])} km (points)")
     b.set_title("Paired gain, same weeks resampled", loc="left")
     b.grid(axis="x"); b.set_axisbelow(True)
@@ -155,19 +165,20 @@ def fig_resolution(t: pd.DataFrame, gains: pd.DataFrame, out) -> None:
              "week-block bootstrap\nintervals; in (b) both grids are resampled with the same weeks. "
              "Anchored models are scored at each station by the fold whose correction never saw it.",
              fontsize=6.3, color=C_MUTED)
-    save(fig, out, "fig13_resolution")
+    save(fig, out, name)
 
 
 def main(res: list[int]) -> None:
     style()
     out = RUNS / "figures"
     t, gains = compare(res)
-    t.to_csv(out / "resolution.csv", index=False)
-    gains.to_csv(out / "resolution_gain.csv", index=False)
+    suf = "" if res == [10, 5] else "_" + "_".join(map(str, res))
+    t.to_csv(out / f"resolution{suf}.csv", index=False)
+    gains.to_csv(out / f"resolution_gain{suf}.csv", index=False)
     show = t[t.network == "all"].pivot(index="model", columns="res_km", values=["rmse", "bias", "skill"])
     print(show.reindex([*MODELS, "B1"]).round(3).to_string())
     print(gains[gains.network == "all"].round(3).to_string(index=False))
-    fig_resolution(t, gains, out)
+    fig_resolution(t, gains, out, f"fig13_resolution{suf}")
 
 
 if __name__ == "__main__":

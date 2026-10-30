@@ -12,6 +12,8 @@
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 export MAXMIN=${MAXMIN:-25}
+# eval cannot resume: skip it when fewer than EVAL_MIN minutes of LIMIT_MIN remain
+T0=$(date +%s); LIMIT_MIN=${LIMIT_MIN:-120}; EVAL_MIN=${EVAL_MIN:-0}
 RES=${RES:-5km}
 for c in ${TARGETS:-corr_a corr_b corr2_a corr2_b}; do
   if [ "$c" = nsrdb ]; then
@@ -23,5 +25,9 @@ for c in ${TARGETS:-corr_a corr_b corr2_a corr2_b}; do
   [ -f $R/swin_B_cod/meta.json ] || bash slurm/stage.sh with-train configs/train_$RES.yaml swinx --track B+cod
   # eval only once both models are complete (Swin may stop at MAXMIN and resume next job)
   [ -f $R/xgb_B_cod/meta.json ] && [ -f $R/swin_B_cod/meta.json ] || continue
-  [ -f $R/eval/stations_summary.csv ] || bash slurm/stage.sh eval
+  [ -f $R/eval/stations_summary.csv ] && continue
+  if [ $(( ($(date +%s) - T0) / 60 + EVAL_MIN )) -gt $LIMIT_MIN ]; then
+    echo "=== skip eval for $c: under $EVAL_MIN min left"; continue
+  fi
+  bash slurm/stage.sh eval
 done
