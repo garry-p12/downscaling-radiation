@@ -29,3 +29,7 @@ venv/
 
 # Slurm / download logs pulled from Vista
 logs/
+
+# Local export backups
+*.bak
+_xscale_export*
